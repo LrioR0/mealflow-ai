@@ -43,7 +43,12 @@ const navItems = [
         </div>
         <div class="operator">管理员 Lrio</div>
       </header>
-      <RouterView />
+      <RouterView v-slot="{ Component }">
+        <!-- Agent 决策页在切换页面时保留运行结果；Kiosk 与其他页面不受影响 -->
+        <KeepAlive include="AgentPlannerView">
+          <component :is="Component" />
+        </KeepAlive>
+      </RouterView>
     </main>
   </div>
 </template>

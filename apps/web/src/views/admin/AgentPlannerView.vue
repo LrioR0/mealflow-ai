@@ -4,6 +4,8 @@ import { computed, ref } from 'vue'
 import { createAgentRun, reviseAgentRun } from '../../api/agent'
 import type { AgentRun, MenuOption } from '../../types/agent'
 
+defineOptions({ name: 'AgentPlannerView' })
+
 const prompt = ref('明天午餐 120 人，预算 900 元，清淡，优先消耗临期番茄，不能含花生')
 const run = ref<AgentRun | null>(null)
 const loading = ref(false)
@@ -54,6 +56,46 @@ function money(cents: number) {
 
 function choose(option: MenuOption) {
   selectedStrategy.value = option.strategy
+}
+
+interface ProcurementRow {
+  ingredient: string
+  required: string
+  available: string
+  missing_quantity: string
+  unit: string
+}
+
+function procurementRows(option: MenuOption): ProcurementRow[] {
+  return option.procurement_list.map((row) => ({
+    ingredient: String(row.ingredient ?? ''),
+    required: String(row.required ?? ''),
+    available: String(row.available ?? ''),
+    missing_quantity: String(row.missing_quantity ?? ''),
+    unit: String(row.unit ?? ''),
+  }))
+}
+
+function exportCsv(option: MenuOption) {
+  const header = ['食材', '需求量', '当前库存', '缺口', '单位']
+  const rows = procurementRows(option).map((row) => [
+    row.ingredient,
+    row.required,
+    row.available,
+    row.missing_quantity,
+    row.unit,
+  ])
+  const table = [header, ...rows]
+  const csv =
+    '\uFEFF' +
+    table.map((cells) => cells.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\r\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `采购清单_${option.title}.csv`
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 </script>
 
@@ -147,6 +189,28 @@ function choose(option: MenuOption) {
               <span>{{ dish.name }}</span><small>{{ dish.servings }} 份</small>
             </li>
           </ul>
+          <div v-if="procurementRows(option).length" class="procurement-block">
+            <details>
+              <summary>采购明细（{{ procurementRows(option).length }} 项缺口）</summary>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>食材</th><th>需求量</th><th>当前库存</th><th>缺口</th><th>单位</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in procurementRows(option)" :key="row.ingredient">
+                      <td>{{ row.ingredient }}</td>
+                      <td>{{ row.required }}</td>
+                      <td>{{ row.available }}</td>
+                      <td><strong>{{ row.missing_quantity }}</strong></td>
+                      <td>{{ row.unit }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+            <button class="ghost-button" @click="exportCsv(option)">导出采购清单 CSV</button>
+          </div>
           <div class="reason-list">
             <span v-for="reason in option.reasons" :key="reason">{{ reason }}</span>
           </div>
@@ -172,3 +236,23 @@ function choose(option: MenuOption) {
     </article>
   </section>
 </template>
+
+<style scoped>
+.procurement-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed rgba(15, 76, 69, 0.2);
+}
+.procurement-block summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #0f4c45;
+}
+.procurement-block .table-wrap table {
+  width: 100%;
+  font-size: 0.85rem;
+}
+</style>
