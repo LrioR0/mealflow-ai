@@ -1,0 +1,19 @@
+services:
+  api:
+    build: ./apps/api
+    env_file:
+      - .env
+    volumes:
+      - mealflow-data:/app/data/local
+    ports:
+      - "8000:8000"
+
+  web:
+    build: ./apps/web
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
+
+volumes:
+  mealflow-data:

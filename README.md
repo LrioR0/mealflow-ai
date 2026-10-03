@@ -14,7 +14,7 @@ V1 的国庆后演示以 Agent 决策为主，管理页面只提供数据与执�
 
 #### 开发状态
 
-项目当前处于 V1 演示版开发准备阶段，计划由 Lrio 与 Colin 在国庆期间用 3–4 天完成，国庆后演示。范围、接口和协作规则见 [技术开发文档](docs/技术开发文档.md) 与 [国庆 3–4 天开发计划](docs/三天开发计划.md)。
+项目已完成 V1 底层框架：FastAPI/SQLite 后端、LangGraph 状态骨架、云端模型 Provider 边界、确定性规则工具、Vue 3 管理端、Agent 轨迹与三方案页面、What-if 接口和公共 PC Kiosk。当前 Agent API 使用可运行的规则基线；填入模型配置后应将约束解析节点替换为真实千问调用。
 
 V1 模型策略已冻结：通过 API 调用千问主模型，DeepSeek 作为备用，智谱作为验证后可替换候选；V1 不进行本地模型部署，V2/V3 再逐步完善模型工程化与私有化评估。
 
@@ -37,7 +37,33 @@ V1 模型策略已冻结：通过 API 调用千问主模型，DeepSeek 作为备
 
 #### 安装与使用
 
-待 Day 1 建立应用骨架后补充真实命令；在此之前请不要把本仓库视为可部署软件。
+要求 Python 3.12/3.13 与 Node.js 20+。从仓库根目录执行：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".\apps\api[dev]"
+Copy-Item .env.example .env
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --app-dir apps/api
+```
+
+另开终端启动前端：
+
+```powershell
+Set-Location apps/web
+npm install
+npm run dev
+```
+
+入口：管理员 Agent `http://localhost:5173/admin/agent`，公共终端 `http://localhost:5173/kiosk`，API 文档 `http://localhost:8000/docs`。
+
+验证命令：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest apps/api -q
+Set-Location apps/web
+npm run typecheck
+npm run build
+```
 #### 参与贡献
 
 1.  Fork 本仓库
