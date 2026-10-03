@@ -1,36 +1,26 @@
 # mealflow-ai
 
 #### Description
-面向情侣和小家庭的菜单规划、食材管理与烹饪指导智能体。
 
-#### Software Architecture
-Software architecture description
+An AI-assisted canteen menu-planning, inventory-collaboration, and employee-feedback system, with an extensible personal-workspace foundation.
 
-#### Installation
+#### Project status
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+The repository is in MVP development preparation. No runnable application has been committed yet. The Chinese documentation is the source of truth for scope and implementation: [technical development document](docs/技术开发文档.md) and [three-day plan](docs/三天开发计划.md).
 
-#### Instructions
+#### Documentation
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+- [MVP acceptance criteria](docs/mvp.md)
+- [API contract](docs/api.md)
+- [Deployment and runbook](docs/部署与运行.md)
+- [Demo script](docs/demo-script.md)
 
+#### Installation and usage
+
+Actual setup commands will be added when the Day 1 application scaffold is committed. Do not treat the repository as deployable before then.
 #### Contribution
 
 1.  Fork the repository
 2.  Create Feat_xxx branch
 3.  Commit your code
 4.  Create Pull Request
-
-
-#### Gitee Feature
-
-1.  You can use Readme\_XXX.md to support different languages, such as Readme\_en.md, Readme\_zh.md
-2.  Gitee blog [blog.gitee.com](https://blog.gitee.com)
-3.  Explore open source project [https://gitee.com/explore](https://gitee.com/explore)
-4.  The most valuable open source project [GVP](https://gitee.com/gvp)
-5.  The manual of Gitee [https://gitee.com/help](https://gitee.com/help)
-6.  The most popular members  [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)

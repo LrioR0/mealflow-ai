@@ -1,38 +1,35 @@
 # mealflow-ai
 
 #### 介绍
-面向情侣和小家庭的菜单规划、食材管理与烹饪指导智能体。
+面向企业食堂的 AI 菜单规划、库存协同与员工反馈系统；底层保留个人家庭工作区的扩展能力。
 
 #### 项目档案
 
 完整的产品需求、Agent 设计、技术方案、机器学习演进路线和开发计划见 [docs/项目档案.md](docs/项目档案.md)。
 
 
-#### 安装教程
+#### 开发状态
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+项目当前处于三天 MVP 开发准备阶段，尚未提交可运行的应用代码。范围、接口和协作规则见 [技术开发文档](docs/技术开发文档.md) 与 [三天开发计划](docs/三天开发计划.md)。
 
-#### 使用说明
+#### 文档入口
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+- [MVP 验收标准](docs/mvp.md)
+- [接口契约](docs/api.md)
+- [数据字典与种子数据规范](docs/数据字典.md)
+- [部署与运行手册](docs/部署与运行.md)
+- [演示脚本](docs/demo-script.md)
+- [安全与隐私说明](docs/安全与隐私.md)
+- [贡献与协作指南](docs/贡献指南.md)
+- [B/C 双端与多租户设计](docs/多租户产品设计.md)
+- [国庆后演示扩展计划](docs/国庆后演示扩展计划.md)
 
+#### 安装与使用
+
+待 Day 1 建立应用骨架后补充真实命令；在此之前请不要把本仓库视为可部署软件。
 #### 参与贡献
 
 1.  Fork 本仓库
 2.  新建 Feat_xxx 分支
 3.  提交代码
 4.  新建 Pull Request
-
-
-#### 特技
-
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
