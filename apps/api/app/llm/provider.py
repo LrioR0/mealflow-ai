@@ -6,6 +6,11 @@ class LLMProvider(ABC):
     """V1 cloud-provider boundary. Business services must not import vendor SDKs."""
 
     @abstractmethod
+    async def chat(self, *, messages: list[dict[str, Any]]) -> str:
+        """普通对话补全，返回首条回复文本。"""
+        raise NotImplementedError
+
+    @abstractmethod
     async def chat_with_tools(
         self,
         *,

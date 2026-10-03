@@ -1,10 +1,25 @@
 # Database migrations
 
-Create the first migration after the V1 data model review:
+表结构的唯一事实来源是 `app/db/models.py`，本目录保存它的变更历史。两人同步表结构的方式是执行迁移，**不要**复制、手改本地 `.sqlite3` 文件。
 
-```text
-alembic revision --autogenerate -m "initial schema"
-alembic upgrade head
+## 日常命令（在 `apps/api` 目录下执行）
+
+```bash
+# 拉取代码后：把本地库升到最新结构
+.venv/Scripts/python -m alembic upgrade head
+
+# 修改 models.py 后：生成增量迁移（生成后先人工检查再提交）
+.venv/Scripts/python -m alembic revision --autogenerate -m "描述这次改动"
+
+# 查看本地库当前版本 / 检查模型与迁移是否漂移
+.venv/Scripts/python -m alembic current
+.venv/Scripts/python -m alembic check
 ```
 
-The development app currently calls `create_all` so the scaffold starts immediately. Replace that convenience with migrations before shared deployment.
+## 约定
+
+1. 改了 `models.py` 必须在同一 commit 里附上对应的迁移文件。
+2. 已推送到远程的迁移文件不再修改，需要变更就追加新迁移。
+3. 两人并行改表产生双头时，后推的人把自己的 `down_revision` 改为指向对方最新迁移，`upgrade head` 验证后再推。
+4. `create_all` 仅保留给测试使用（`tests/conftest.py`），运行中的应用一律走迁移。
+5. 演示数据可随时销毁：破坏性变更直接删除 `data/local/mealflow.sqlite3` 后重新 `upgrade head` + 跑种子脚本。

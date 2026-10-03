@@ -47,6 +47,34 @@ class Workspace(TimestampMixin, Base):
     kind: Mapped[str] = mapped_column(String(32), default=WorkspaceKind.ORGANIZATION.value)
 
 
+class User(TimestampMixin, Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    email: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    display_name: Mapped[str] = mapped_column(String(80))
+
+
+class WorkspaceMember(TimestampMixin, Base):
+    __tablename__ = "workspace_members"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(32), default="member")
+    status: Mapped[str] = mapped_column(String(32), default="active")
+
+
+class DietaryRestriction(TimestampMixin, Base):
+    __tablename__ = "dietary_restrictions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    type: Mapped[str] = mapped_column(String(32))
+    ingredient_key: Mapped[str] = mapped_column(String(80))
+
+
 class Site(TimestampMixin, Base):
     __tablename__ = "sites"
 
@@ -102,6 +130,21 @@ class Recipe(TimestampMixin, Base):
     allergens: Mapped[list[str]] = mapped_column(JSON, default=list)
     steps: Mapped[list[str]] = mapped_column(JSON, default=list)
     source_name: Mapped[str] = mapped_column(String(160), default="自制演示数据")
+    source_url: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    license_note: Mapped[str] = mapped_column(
+        String(200), default="自制演示数据，仅用于演示，可再分发"
+    )
+
+
+class RecipeIngredient(TimestampMixin, Base):
+    __tablename__ = "recipe_ingredients"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    recipe_id: Mapped[str] = mapped_column(ForeignKey("recipes.id"), index=True)
+    ingredient_id: Mapped[str] = mapped_column(ForeignKey("ingredients.id"), index=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3))
+    unit: Mapped[str] = mapped_column(String(20))
+    optional: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class AgentRun(TimestampMixin, Base):

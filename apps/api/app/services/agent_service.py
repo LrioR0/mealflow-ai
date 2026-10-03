@@ -1,8 +1,20 @@
+"""Agent 服务：约束解析、工具编排、三方案生成、What-if 重规划、运行记录落库。
+
+当前约束解析为规则基线（模型超时/失败时的同一降级路径）；配置 LLM_API_KEY 后
+由 LLMProvider 替换解析节点，HTTP 契约不变（技术开发文档 5.2、6）。
+"""
+
+import json
 import re
-from copy import deepcopy
-from uuid import uuid4
+import time
+import uuid
+from datetime import date
 
 from app.core.config import get_settings
+from app.db.models import AgentRun, MealService, ToolTrace
+from app.db.session import SessionLocal
+from app.llm.factory import build_llm_provider
+from app.llm.provider import LLMProvider
 from app.schemas.agent import (
     AgentRunView,
     MenuOption,
@@ -10,122 +22,395 @@ from app.schemas.agent import (
     RunStatus,
     ToolTraceView,
 )
+from app.services import planning
+from app.services.context_loader import (
+    PlanningContext,
+    ScopeNotFoundError,
+    load_planning_context,
+)
 
-_RUNS: dict[str, AgentRunView] = {}
 
-
-def _extract_constraints(text: str) -> PlanningConstraints:
+def _extract_constraints(text: str, context: PlanningContext) -> PlanningConstraints:
     diner_match = re.search(r"(\d+)\s*人", text)
     budget_match = re.search(r"预算\s*(\d+)\s*元", text)
     return PlanningConstraints(
-        expected_diners=int(diner_match.group(1)) if diner_match else None,
-        budget_limit_cents=int(budget_match.group(1)) * 100 if budget_match else None,
-        dietary_style=[item for item in ["清淡" if "清淡" in text else None] if item],
+        expected_diners=int(diner_match.group(1)) if diner_match else context.expected_diners,
+        budget_limit_cents=(
+            int(budget_match.group(1)) * 100 if budget_match else context.budget_limit_cents
+        ),
+        dietary_style=["清淡"] if "清淡" in text else [],
         excluded_ingredients=["花生"] if "花生" in text else [],
         prioritize_expiring="临期" in text or "到期" in text,
         time_limit_minutes=90,
     )
 
 
-def _trace(name: str, output: str, duration: int) -> ToolTraceView:
-    return ToolTraceView(
-        tool_name=name,
-        status="success",
-        duration_ms=duration,
-        input_summary="已校验业务作用域",
-        output_summary=output,
+def _constraints_summary(constraints: PlanningConstraints) -> str:
+    budget = (
+        f"{constraints.budget_limit_cents / 100:.0f} 元"
+        if constraints.budget_limit_cents
+        else "未指定"
+    )
+    return (
+        f"人数 {constraints.expected_diners or '未指定'}，预算 {budget}，"
+        f"风格 {'、'.join(constraints.dietary_style) or '无'}，"
+        f"排除 {'、'.join(constraints.excluded_ingredients) or '无'}，"
+        f"临期优先 {'是' if constraints.prioritize_expiring else '否'}"
     )
 
 
-def _options(diners: int, budget_cents: int | None) -> list[MenuOption]:
-    factor = diners / 120
-    base_costs = [83600, 78200, 89500]
-    strategies = [
-        ("expiring_first", "临期优先", {"expiring": 0.92, "cost": 0.72, "feedback": 0.76}),
-        ("cost_first", "成本优先", {"expiring": 0.68, "cost": 0.94, "feedback": 0.71}),
-        ("satisfaction_first", "满意度优先", {"expiring": 0.64, "cost": 0.66, "feedback": 0.93}),
-    ]
-    result: list[MenuOption] = []
-    for index, (key, title, score) in enumerate(strategies):
-        cost = round(base_costs[index] * factor)
-        warnings = []
-        if budget_cents and cost > budget_cents:
-            warnings.append("预计成本超过当前预算，需调整方案")
-        result.append(
-            MenuOption(
-                strategy=key,
-                title=title,
-                items=[
-                    {"name": "番茄炒蛋", "servings": diners, "kcal_per_serving": 186},
-                    {"name": "清炒时蔬", "servings": diners, "kcal_per_serving": 92},
-                    {"name": "土豆烧鸡", "servings": diners, "kcal_per_serving": 328},
-                ],
-                estimated_cost_cents=cost,
-                estimated_kcal_per_serving=606,
-                score_breakdown=score,
-                procurement_list=[
-                    {"ingredient": "鸡蛋", "missing_quantity": f"{round(18 * factor, 1)}kg"},
-                    {"ingredient": "鸡胸肉", "missing_quantity": f"{round(24 * factor, 1)}kg"},
-                ],
-                reasons=["命中清淡偏好", "已排除花生", "优先利用两天内到期的番茄"],
-                warnings=warnings,
-            )
-        )
-    return result
+_CONSTRAINT_SYSTEM_PROMPT = (
+    "你是机关食堂运营规划 Agent 的约束解析器。从用户需求中抽取结构化约束，"
+    "只输出一个 JSON 对象，不要输出解释或代码块标记。字段定义："
+    '{"expected_diners": 用餐人数整数或null, '
+    '"budget_limit_cents": 预算总金额（元乘以100）整数或null, '
+    '"dietary_style": 口味风格标签数组如["清淡"], '
+    '"excluded_ingredients": 排除食材名称数组, '
+    '"prioritize_expiring": 是否优先使用临期食材的布尔值, '
+    '"time_limit_minutes": 出餐时长上限整数或null}。'
+    "无法确定的字段填 null 或空数组。金额必须换算为分。"
+)
 
 
-def create_demo_run(request_text: str) -> AgentRunView:
+def _strip_code_fence(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```")[1] if "```" in cleaned else cleaned
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+    return cleaned.strip()
+
+
+async def _parse_constraints_with_llm(
+    provider: LLMProvider | None, request_text: str, context: PlanningContext
+) -> tuple[PlanningConstraints, ToolTraceView, bool]:
+    """返回 (约束, 解析轨迹, 是否成功使用模型)。模型不可用/失败时降级规则基线。"""
     settings = get_settings()
-    constraints = _extract_constraints(request_text)
-    diners = constraints.expected_diners or 120
+    if provider is None:
+        return (
+            _extract_constraints(request_text, context),
+            ToolTraceView(
+                tool_name="parse_request",
+                status="skipped",
+                duration_ms=0,
+                input_summary="规则基线（未配置云端模型）",
+                output_summary="由规则引擎完成约束解析",
+            ),
+            False,
+        )
+
+    started = time.perf_counter()
+    try:
+        raw = await provider.chat(
+            messages=[
+                {"role": "system", "content": _CONSTRAINT_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"餐次上下文：{context.service_date} {context.meal_service_name}，"
+                        f"默认 {context.expected_diners} 人。"
+                        f"用户需求：{request_text}"
+                    ),
+                },
+            ]
+        )
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        data = json.loads(_strip_code_fence(raw))
+        if data.get("budget_limit_cents") is None and data.get("budget_yuan") is not None:
+            data["budget_limit_cents"] = int(data.pop("budget_yuan")) * 100
+        constraints = PlanningConstraints(**data)
+        trace = ToolTraceView(
+            tool_name="parse_request",
+            status="success",
+            duration_ms=duration_ms,
+            input_summary=f"LLM 约束解析（{settings.llm_provider}/{settings.llm_model}）",
+            output_summary=_constraints_summary(constraints),
+        )
+        return constraints, trace, True
+    except Exception as exc:  # 模型失败必须降级，不阻断核心计算
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        constraints = _extract_constraints(request_text, context)
+        trace = ToolTraceView(
+            tool_name="parse_request",
+            status="fallback",
+            duration_ms=duration_ms,
+            input_summary=f"LLM 约束解析（{settings.llm_provider}/{settings.llm_model}）",
+            output_summary=f"模型解析失败，已降级规则基线：{type(exc).__name__}: {str(exc)[:120]}",
+            error_code="llm_parse_failed",
+        )
+        return constraints, trace, False
+
+
+def _timed_tool(
+    name: str, input_summary: str, produce_output
+) -> tuple[ToolTraceView, object]:
+    """produce_output 返回展示字符串，或 (展示字符串, 数据负载) 二元组。"""
+    started = time.perf_counter()
+    result = produce_output()
+    duration_ms = round((time.perf_counter() - started) * 1000)
+    if isinstance(result, tuple) and len(result) == 2:
+        display, payload = result
+    else:
+        display, payload = result, None
+    return (
+        ToolTraceView(
+            tool_name=name,
+            status="success",
+            duration_ms=duration_ms,
+            input_summary=input_summary,
+            output_summary=str(display),
+        ),
+        payload,
+    )
+
+
+def _plan(
+    context: PlanningContext, constraints: PlanningConstraints, parse_trace: ToolTraceView
+) -> tuple[list[ToolTraceView], list[MenuOption], list[str]]:
+    diners = constraints.expected_diners or context.expected_diners
+    traces: list[ToolTraceView] = [parse_trace]
+
+    trace, _ = _timed_tool(
+        "get_meal_service_context",
+        "已校验业务作用域",
+        lambda: f"{context.workspace_name}·{context.site_name} "
+        f"{context.service_date} {context.meal_service_name} 预计 {diners} 人",
+    )
+    traces.append(trace)
+
+    def _inventory_summary() -> str:
+        expiring_keys = context.expiring_keys(date.today())
+        expiring_names = "、".join(
+            line.name for line in context.inventory if line.key in expiring_keys
+        )
+        return f"{len(context.inventory)} 项库存，临期 {len(expiring_keys)} 项（{expiring_names}）"
+
+    trace, _ = _timed_tool("list_inventory", "读取可用库存", _inventory_summary)
+    traces.append(trace)
+
+    def _feedback_summary() -> str:
+        if context.feedback_count == 0:
+            return "暂无历史反馈，软评分取中性值"
+        tags = "、".join(context.feedback_top_tags) or "无标签"
+        avg = context.feedback_avg_rating or 0
+        return f"{context.feedback_count} 条反馈，平均 {avg:.1f} 分，主要标签：{tags}"
+
+    trace, _ = _timed_tool("get_feedback_summary", "读取反馈聚合", _feedback_summary)
+    traces.append(trace)
+
+    trace, _ = _timed_tool(
+        "search_recipe_candidates", "全量召回菜谱", lambda: f"召回 {len(context.recipes)} 道候选菜"
+    )
+    traces.append(trace)
+
+    key_names = planning.build_key_names(context)
+
+    def _hard_filter():
+        kept, filtered_out = planning.hard_filter(
+            context.recipes, context.excluded_keys, key_names
+        )
+        detail = "；".join(f"{name}（{reason}）" for name, reason in filtered_out) or "无"
+        return f"保留 {len(kept)} 道，过滤 {len(filtered_out)} 道：{detail}", (kept, filtered_out)
+
+    trace, (kept, filtered_out) = _timed_tool(
+        "filter_hard_constraints",
+        f"受限食材：{'、'.join(context.excluded_keys) or '无'}",
+        _hard_filter,
+    )
+    traces.append(trace)
+
+    expiring_keys = context.expiring_keys(context.service_date)
+
+    def _score_and_build():
+        scored = planning.score_candidates(kept, context, constraints, expiring_keys)
+        options = planning.build_all_options(
+            scored, context, constraints, filtered_out, key_names
+        )
+        summary = "、".join(
+            f"{option.title}（{option.score_breakdown['total']}分）" for option in options
+        )
+        return f"三方案生成：{summary}", options
+
+    trace, options = _timed_tool(
+        "score_menu_options", f"候选 {len(kept)} 道，三策略加权", _score_and_build
+    )
+    traces.append(trace)
+
+    expiring_first = next(option for option in options if option.strategy == "expiring_first")
+    chosen_names = {item["name"] for item in expiring_first.items}
+    chosen_recipes = [recipe for recipe in kept if recipe.name in chosen_names]
+
+    def _scale():
+        requirements = planning.compute_requirements(chosen_recipes, diners)
+        return (
+            f"按 {diners} 人换算 {len(chosen_recipes)} 道菜共 {len(requirements)} 项食材用量",
+            requirements,
+        )
+
+    trace, requirements = _timed_tool(
+        "scale_recipe_quantities",
+        f"基准份数 → {diners} 人",
+        _scale,
+    )
+    traces.append(trace)
+
+    def _estimate() -> str:
+        total_cost, total_kcal = planning.estimate_totals(chosen_recipes, diners)
+        return (
+            f"按“{expiring_first.title}”估算：人均约 {total_kcal} kcal，"
+            f"总成本约 {total_cost / 100:.0f} 元"
+        )
+
+    trace, _ = _timed_tool("estimate_nutrition_and_cost", "热量与成本估算", _estimate)
+    traces.append(trace)
+
+    def _procurement() -> str:
+        lines = planning.procurement_lines(requirements, context, key_names)
+        detail = "、".join(f"{line['ingredient']} 缺 {line['missing_quantity']}" for line in lines[:5])
+        return f"{len(lines)} 项采购缺口：{detail}"
+
+    trace, _ = _timed_tool("build_procurement_list", "比对库存计算缺口", _procurement)
+    traces.append(trace)
+
+    warnings: list[str] = []
+    if parse_trace.status == "skipped":
+        warnings.append("未配置云端模型（LLM_API_KEY 为空），约束解析由规则基线完成")
+    elif parse_trace.status == "fallback":
+        warnings.append("云端模型解析失败，约束解析已降级规则基线（详见工具轨迹 parse_request）")
+
+    return traces, options, warnings
+
+
+def _save_run(run: AgentRunView, request_text: str, scope: tuple[str, str]) -> None:
+    workspace_id, meal_service_id = scope
+    state = {
+        "options": [option.model_dump() for option in run.options],
+        "tool_trace": [trace.model_dump() for trace in run.tool_trace],
+        "warnings": run.warnings,
+        "approval_status": run.approval_status,
+    }
+    with SessionLocal() as session:
+        row = session.get(AgentRun, run.id)
+        if row is None:
+            row = AgentRun(
+                id=run.id,
+                workspace_id=workspace_id,
+                meal_service_id=meal_service_id,
+                request_text=request_text,
+            )
+            session.add(row)
+        row.constraints = run.constraints.model_dump()
+        row.state = state
+        row.status = run.status.value
+        row.provider = run.provider
+        row.model = run.model
+        session.query(ToolTrace).filter(ToolTrace.agent_run_id == run.id).delete()
+        for trace in run.tool_trace:
+            session.add(
+                ToolTrace(
+                    agent_run_id=run.id,
+                    tool_name=trace.tool_name,
+                    status=trace.status,
+                    duration_ms=trace.duration_ms,
+                    input_summary=trace.input_summary,
+                    output_summary=trace.output_summary,
+                    error_code=trace.error_code,
+                )
+            )
+        session.commit()
+
+
+def _to_view(row: AgentRun) -> AgentRunView:
+    state = row.state or {}
+    return AgentRunView(
+        id=row.id,
+        status=RunStatus(row.status),
+        constraints=PlanningConstraints(**(row.constraints or {})),
+        tool_trace=[ToolTraceView(**trace) for trace in state.get("tool_trace", [])],
+        options=[MenuOption(**option) for option in state.get("options", [])],
+        warnings=state.get("warnings", []),
+        approval_status=state.get("approval_status", "not_requested"),
+        provider=row.provider,
+        model=row.model,
+    )
+
+
+async def create_run(
+    workspace_id: str, site_id: str, meal_service_id: str, request_text: str
+) -> AgentRunView:
+    with SessionLocal() as session:
+        context = load_planning_context(session, workspace_id, site_id, meal_service_id)
+
+    provider = build_llm_provider(get_settings())
+    constraints, parse_trace, used_llm = await _parse_constraints_with_llm(
+        provider, request_text, context
+    )
+    traces, options, warnings = _plan(context, constraints, parse_trace)
+
+    settings = get_settings()
     run = AgentRunView(
-        id=str(uuid4()),
+        id=str(uuid.uuid4()),
         status=RunStatus.WAITING_APPROVAL,
         constraints=constraints,
-        tool_trace=[
-            _trace("get_meal_service_context", f"午餐，预计 {diners} 人", 18),
-            _trace("list_inventory", "4 项库存，发现 1 项临期", 24),
-            _trace("get_feedback_summary", "平均分 4.1，主要标签：份量少", 16),
-            _trace("search_recipe_candidates", "召回 20 道候选菜", 41),
-            _trace("filter_hard_constraints", "过滤含花生菜品 2 道", 12),
-            _trace("scale_recipe_quantities", f"已按 {diners} 人换算", 9),
-            _trace("estimate_nutrition_and_cost", "已完成热量与成本估算", 15),
-            _trace("build_procurement_list", "已生成采购缺口", 11),
-        ],
-        options=_options(diners, constraints.budget_limit_cents),
-        warnings=["当前为规则基线骨架；配置云端模型后替换约束解析节点"],
+        tool_trace=traces,
+        options=options,
+        warnings=warnings,
         approval_status="waiting",
-        provider=settings.llm_provider if settings.llm_api_key else None,
-        model=settings.llm_model or None,
+        provider=settings.llm_provider if used_llm else None,
+        model=settings.llm_model if used_llm else None,
     )
-    _RUNS[run.id] = run
+    _save_run(run, request_text, scope=(workspace_id, meal_service_id))
     return run
 
 
-def get_demo_run(run_id: str) -> AgentRunView | None:
-    return _RUNS.get(run_id)
+def get_run(run_id: str) -> AgentRunView | None:
+    with SessionLocal() as session:
+        row = session.get(AgentRun, run_id)
+        if row is None:
+            return None
+        return _to_view(row)
 
 
-def revise_demo_run(
+async def revise_run(
     run_id: str, expected_diners: int | None, budget_limit_cents: int | None
 ) -> AgentRunView | None:
-    current = _RUNS.get(run_id)
-    if current is None:
-        return None
-    revised = current.model_copy(deep=True)
-    constraints = deepcopy(revised.constraints)
+    with SessionLocal() as session:
+        row = session.get(AgentRun, run_id)
+        if row is None:
+            return None
+        view = _to_view(row)
+        scope = (row.workspace_id, row.meal_service_id)
+
+    with SessionLocal() as session:
+        meal_service = session.get(MealService, scope[1])
+        site_id = meal_service.site_id if meal_service else ""
+        context = load_planning_context(session, scope[0], site_id, scope[1])
+
+    # What-if 重规划沿用创建时已解析的约束（保留 LLM 解析结果），只覆盖显式修改的字段
+    constraints = view.constraints.model_copy(deep=True)
     if expected_diners is not None:
         constraints.expected_diners = expected_diners
     if budget_limit_cents is not None:
         constraints.budget_limit_cents = budget_limit_cents
-    diners = constraints.expected_diners or 120
-    revised.constraints = constraints
-    revised.options = _options(diners, constraints.budget_limit_cents)
-    revised.tool_trace.extend(
-        [
-            _trace("scale_recipe_quantities", f"What-if：重新按 {diners} 人换算", 8),
-            _trace("build_procurement_list", "What-if：已更新采购缺口", 10),
-        ]
+
+    parse_trace = ToolTraceView(
+        tool_name="parse_request",
+        status="success",
+        duration_ms=0,
+        input_summary="What-if 重规划",
+        output_summary=_constraints_summary(constraints),
     )
-    _RUNS[run_id] = revised
+    traces, options, warnings = _plan(context, constraints, parse_trace)
+
+    revised = view.model_copy(deep=True)
+    revised.constraints = constraints
+    revised.options = options
+    revised.tool_trace = view.tool_trace + traces
+    revised.warnings = warnings
+    revised.status = RunStatus.WAITING_APPROVAL
+    revised.approval_status = "waiting"
+    _save_run(revised, row.request_text or "", scope)
     return revised
+
+
+__all__ = ["ScopeNotFoundError", "create_run", "get_run", "revise_run"]

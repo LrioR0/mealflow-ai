@@ -10,6 +10,15 @@ class OpenAICompatibleCloudProvider(LLMProvider):
         self.model = model
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout_seconds)
 
+    async def chat(self, *, messages: list[dict[str, Any]]) -> str:
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,  # type: ignore[arg-type]
+            temperature=0.1,
+        )
+        content = response.choices[0].message.content
+        return content or ""
+
     async def chat_with_tools(
         self,
         *,
