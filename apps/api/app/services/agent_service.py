@@ -164,9 +164,18 @@ def _timed_tool(
     )
 
 
+def _restriction_chips(context: PlanningContext, key_names: dict[str, str]) -> list[str]:
+    """食堂档案预置的用餐限制（allergy/dislike），与本次输入无关，用于 UI 明示来源。"""
+    chips = []
+    for key, kind in context.restriction_types.items():
+        label = "过敏原" if kind == "allergy" else "忌口"
+        chips.append(f"{label}：{key_names.get(key, key)}")
+    return chips
+
+
 def _plan(
     context: PlanningContext, constraints: PlanningConstraints, parse_trace: ToolTraceView
-) -> tuple[list[ToolTraceView], list[MenuOption], list[str]]:
+) -> tuple[list[ToolTraceView], list[MenuOption], list[str], list[str]]:
     diners = constraints.expected_diners or context.expected_diners
     traces: list[ToolTraceView] = [parse_trace]
 
@@ -193,7 +202,16 @@ def _plan(
             return "暂无历史反馈，软评分取中性值"
         tags = "、".join(context.feedback_top_tags) or "无标签"
         avg = context.feedback_avg_rating or 0
-        return f"{context.feedback_count} 条反馈，平均 {avg:.1f} 分，主要标签：{tags}"
+        detail = f"{context.feedback_count} 条反馈，平均 {avg:.1f} 分，主要标签：{tags}"
+        if context.dish_feedback:
+            top_dishes = sorted(
+                context.dish_feedback.items(), key=lambda kv: -kv[1].sample_count
+            )[:3]
+            detail += "；菜品聚合：" + "、".join(
+                f"{name} {stats.avg_rating:.1f} 分（{stats.sample_count} 条）"
+                for name, stats in top_dishes
+            )
+        return detail
 
     trace, _ = _timed_tool("get_feedback_summary", "读取反馈聚合", _feedback_summary)
     traces.append(trace)
@@ -204,17 +222,18 @@ def _plan(
     traces.append(trace)
 
     key_names = planning.build_key_names(context)
+    workspace_restrictions = _restriction_chips(context, key_names)
 
     def _hard_filter():
         kept, filtered_out = planning.hard_filter(
-            context.recipes, context.excluded_keys, key_names
+            context.recipes, context.excluded_keys, key_names, context.restriction_types
         )
         detail = "；".join(f"{name}（{reason}）" for name, reason in filtered_out) or "无"
         return f"保留 {len(kept)} 道，过滤 {len(filtered_out)} 道：{detail}", (kept, filtered_out)
 
     trace, (kept, filtered_out) = _timed_tool(
         "filter_hard_constraints",
-        f"受限食材：{'、'.join(context.excluded_keys) or '无'}",
+        f"食堂档案限制：{'、'.join(workspace_restrictions) or '无'}",
         _hard_filter,
     )
     traces.append(trace)
@@ -278,7 +297,7 @@ def _plan(
     elif parse_trace.status == "fallback":
         warnings.append("云端模型解析失败，约束解析已降级规则基线（详见工具轨迹 parse_request）")
 
-    return traces, options, warnings
+    return traces, options, warnings, workspace_restrictions
 
 
 def _save_run(run: AgentRunView, request_text: str, scope: tuple[str, str]) -> None:
@@ -288,6 +307,7 @@ def _save_run(run: AgentRunView, request_text: str, scope: tuple[str, str]) -> N
         "tool_trace": [trace.model_dump() for trace in run.tool_trace],
         "warnings": run.warnings,
         "approval_status": run.approval_status,
+        "workspace_restrictions": run.workspace_restrictions,
     }
     with SessionLocal() as session:
         row = session.get(AgentRun, run.id)
@@ -329,6 +349,7 @@ def _to_view(row: AgentRun) -> AgentRunView:
         tool_trace=[ToolTraceView(**trace) for trace in state.get("tool_trace", [])],
         options=[MenuOption(**option) for option in state.get("options", [])],
         warnings=state.get("warnings", []),
+        workspace_restrictions=state.get("workspace_restrictions", []),
         approval_status=state.get("approval_status", "not_requested"),
         provider=row.provider,
         model=row.model,
@@ -345,7 +366,7 @@ async def create_run(
     constraints, parse_trace, used_llm = await _parse_constraints_with_llm(
         provider, request_text, context
     )
-    traces, options, warnings = _plan(context, constraints, parse_trace)
+    traces, options, warnings, workspace_restrictions = _plan(context, constraints, parse_trace)
 
     settings = get_settings()
     run = AgentRunView(
@@ -355,6 +376,7 @@ async def create_run(
         tool_trace=traces,
         options=options,
         warnings=warnings,
+        workspace_restrictions=workspace_restrictions,
         approval_status="waiting",
         provider=settings.llm_provider if used_llm else None,
         model=settings.llm_model if used_llm else None,
@@ -408,13 +430,14 @@ async def revise_run(
         input_summary="What-if 重规划",
         output_summary=_constraints_summary(constraints),
     )
-    traces, options, warnings = _plan(context, constraints, parse_trace)
+    traces, options, warnings, workspace_restrictions = _plan(context, constraints, parse_trace)
 
     revised = view.model_copy(deep=True)
     revised.constraints = constraints
     revised.options = options
     revised.tool_trace = view.tool_trace + traces
     revised.warnings = warnings
+    revised.workspace_restrictions = workspace_restrictions
     revised.status = RunStatus.WAITING_APPROVAL
     revised.approval_status = "waiting"
     _save_run(revised, row.request_text or "", scope)

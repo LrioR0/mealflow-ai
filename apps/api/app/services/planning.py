@@ -9,11 +9,14 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from app.schemas.agent import MenuOption, PlanningConstraints
-from app.services.context_loader import PlanningContext, RecipeContext
+from app.services.context_loader import DishFeedbackStats, PlanningContext, RecipeContext
 from app.services.planning_rules import procurement_gap, scale_quantity, violates_allergen
 
 TIME_LIMIT_DEFAULT_MINUTES = 90
 DISHES_PER_OPTION = 3
+FEEDBACK_NEUTRAL = 0.5
+# 样本量达到该值后反馈分量不再向中性值收缩（评分终端设计：低样本只作提示）
+FEEDBACK_FULL_CONFIDENCE_SAMPLE = 5
 
 
 @dataclass(frozen=True)
@@ -46,24 +49,48 @@ def build_key_names(context: PlanningContext) -> dict[str, str]:
     return key_names
 
 
+def _restriction_label(key: str, restriction_types: dict[str, str]) -> str:
+    kind = restriction_types.get(key, "allergy")
+    return "过敏原" if kind == "allergy" else "忌口"
+
+
 def hard_filter(
-    recipes: list[RecipeContext], excluded_keys: list[str], key_names: dict[str, str]
+    recipes: list[RecipeContext],
+    excluded_keys: list[str],
+    key_names: dict[str, str],
+    restriction_types: dict[str, str] | None = None,
 ) -> tuple[list[RecipeContext], list[tuple[str, str]]]:
-    """返回 (保留菜谱, [(被过滤菜谱名, 原因)])。过敏原与忌口均为硬约束。"""
-    excluded_names = [key_names[key] for key in excluded_keys if key in key_names]
+    """返回 (保留菜谱, [(被过滤菜谱名, 原因)])。过敏原与忌口均为硬约束，来源是食堂档案。"""
+    types = restriction_types or {}
     kept: list[RecipeContext] = []
     filtered: list[tuple[str, str]] = []
     for recipe in recipes:
         hit_keys = recipe.required_ingredient_keys & set(excluded_keys)
         if hit_keys:
-            names = "、".join(key_names.get(key, key) for key in sorted(hit_keys))
-            filtered.append((recipe.name, f"含受限食材（{names}）"))
+            detail = "、".join(
+                f"{_restriction_label(key, types)}：{key_names.get(key, key)}"
+                for key in sorted(hit_keys)
+            )
+            filtered.append((recipe.name, f"命中食堂档案限制（{detail}）"))
             continue
+        excluded_names = [key_names[key] for key in excluded_keys if key in key_names]
         if violates_allergen(recipe.allergens, excluded_names):
-            filtered.append((recipe.name, f"过敏原命中（{'、'.join(excluded_names)}）"))
+            hit_names = "、".join(
+                name for name in excluded_names if name in recipe.allergens
+            )
+            filtered.append((recipe.name, f"过敏原命中（{hit_names}）"))
             continue
         kept.append(recipe)
     return kept, filtered
+
+
+def feedback_component(stats: DishFeedbackStats | None) -> float:
+    """1–5 分映射到 0–1；样本不足时向中性值收缩，低样本不会大幅改变排序。"""
+    if stats is None or stats.sample_count <= 0:
+        return FEEDBACK_NEUTRAL
+    normalized = (stats.avg_rating - 1.0) / 4.0
+    confidence = min(stats.sample_count / FEEDBACK_FULL_CONFIDENCE_SAMPLE, 1.0)
+    return round(FEEDBACK_NEUTRAL + (normalized - FEEDBACK_NEUTRAL) * confidence, 3)
 
 
 def component_scores(
@@ -72,6 +99,7 @@ def component_scores(
     style_tags: list[str],
     time_limit_minutes: int,
     cost_cap_cents: int,
+    dish_feedback: dict[str, DishFeedbackStats] | None = None,
 ) -> dict[str, float]:
     required = [line for line in recipe.ingredients if not line.optional]
     if required:
@@ -90,7 +118,7 @@ def component_scores(
         "preference": round(preference, 3),
         "time": round(time_fit, 3),
         "budget": round(budget_fit, 3),
-        "feedback": 0.5,  # V1 反馈闭环接入前取中性值
+        "feedback": feedback_component((dish_feedback or {}).get(recipe.name)),
     }
 
 
@@ -104,7 +132,17 @@ def score_candidates(
     time_limit = constraints.time_limit_minutes or TIME_LIMIT_DEFAULT_MINUTES
     cost_cap = max((recipe.estimated_cost_cents or 0 for recipe in kept), default=0) or 1
     return [
-        (recipe, component_scores(recipe, expiring_keys, style_tags, time_limit, cost_cap))
+        (
+            recipe,
+            component_scores(
+                recipe,
+                expiring_keys,
+                style_tags,
+                time_limit,
+                cost_cap,
+                context.dish_feedback,
+            ),
+        )
         for recipe in kept
     ]
 
@@ -209,11 +247,31 @@ def build_option(
         if any(style in recipe.tags for recipe in chosen):
             reasons.append(f"命中“{style}”偏好")
     if filtered_out:
-        reasons.append("已排除：" + "；".join(f"{name}（{reason}）" for name, reason in filtered_out[:3]))
+        reasons.append(
+            "已按食堂档案的用餐限制排除（非本次输入）："
+            + "；".join(f"{name}（{reason}）" for name, reason in filtered_out[:3])
+        )
     if weights.key == "cost_first":
         reasons.append("按成本分量加权选择低价组合")
     if weights.key == "satisfaction_first":
         reasons.append("按口味偏好与历史反馈加权")
+
+    # 反馈回流（评分终端设计 §5）：只影响软评分并给出可解释提示，不突破硬约束
+    penalized: list[str] = []
+    favored: list[str] = []
+    for recipe in chosen:
+        stats = context.dish_feedback.get(recipe.name)
+        if stats is None or stats.sample_count <= 0:
+            continue
+        if stats.avg_rating < 3.5:
+            reason_tags = "、".join(stats.top_tags) or "整体"
+            penalized.append(f"{recipe.name}（上次 {stats.avg_rating:.1f} 分，{reason_tags}反馈较多）")
+        elif stats.avg_rating >= 4.5:
+            favored.append(f"{recipe.name}（上次 {stats.avg_rating:.1f} 分）")
+    if penalized:
+        reasons.append("反馈回流：上次评分偏低的菜品已降低权重——" + "；".join(penalized))
+    if favored:
+        reasons.append("反馈回流：上次评分较高，满意度加权保留——" + "、".join(favored))
 
     warnings: list[str] = []
     budget_cents = constraints.budget_limit_cents

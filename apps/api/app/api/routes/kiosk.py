@@ -1,37 +1,43 @@
-from uuid import uuid4
+"""Kiosk 终端路由（docs/api.md、docs/评分终端设计.md）。
+
+设备令牌只能读取当前已发布菜单并提交匿名反馈，不能调用管理端或 Agent 接口；
+反馈定位由服务端按设备绑定站点解析，请求体不携带用户身份。
+"""
 
 from fastapi import APIRouter, Header, HTTPException, status
 
-from app.core.config import get_settings
-from app.schemas.kiosk import FeedbackAccepted, FeedbackCreate
+from app.schemas.kiosk import FeedbackAccepted, FeedbackCreate, KioskMenuView
+from app.services.feedback_service import (
+    KioskAuthError,
+    NoPublishedMenuError,
+    RateLimitedError,
+    current_menu,
+    submit_feedback,
+)
 
 router = APIRouter(prefix="/kiosk", tags=["kiosk"])
 
 
-def _check_device_token(token: str | None) -> None:
-    settings = get_settings()
-    if not settings.demo_mode and not token:
-        raise HTTPException(status_code=401, detail="Missing kiosk device token")
-
-
-@router.get("/current-menu")
-def current_menu(x_kiosk_token: str | None = Header(default=None)) -> dict:
-    _check_device_token(x_kiosk_token)
-    return {
-        "meal_service": {"name": "午餐", "expected_diners": 120, "status": "published"},
-        "menu": [
-            {"name": "番茄炒蛋", "kcal_per_serving": 186, "allergens": ["蛋"]},
-            {"name": "土豆烧鸡", "kcal_per_serving": 328, "allergens": []},
-            {"name": "清炒时蔬", "kcal_per_serving": 92, "allergens": []},
-        ],
-    }
+@router.get("/current-menu", response_model=KioskMenuView)
+def get_current_menu(x_kiosk_token: str | None = Header(default=None)) -> KioskMenuView:
+    try:
+        return current_menu(x_kiosk_token)
+    except KioskAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    except NoPublishedMenuError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.post("/feedback", response_model=FeedbackAccepted, status_code=status.HTTP_201_CREATED)
-def submit_feedback(
+def post_feedback(
     payload: FeedbackCreate,
     x_kiosk_token: str | None = Header(default=None),
 ) -> FeedbackAccepted:
-    _check_device_token(x_kiosk_token)
-    # Persistence and per-device rate limiting belong in FeedbackService.
-    return FeedbackAccepted(id=str(uuid4()))
+    try:
+        return submit_feedback(x_kiosk_token, payload)
+    except KioskAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    except RateLimitedError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    except NoPublishedMenuError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

@@ -5,9 +5,13 @@ from app.db.seed import seed_demo_data
 
 @pytest.fixture(autouse=True)
 def _database_schema():
-    from app.db.session import create_database_schema
+    """每个测试使用全新空库：发布/反馈等状态不能跨测试泄漏。"""
+    from app.db import models  # noqa: F401
+    from app.db.base import Base
+    from app.db.session import engine
 
-    create_database_schema()
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
 
 
 @pytest.fixture(autouse=True)

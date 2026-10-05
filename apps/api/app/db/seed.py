@@ -22,6 +22,7 @@ from app.db.models import (
     DietaryRestriction,
     Ingredient,
     InventoryItem,
+    KioskDevice,
     MealService,
     Recipe,
     RecipeIngredient,
@@ -31,8 +32,13 @@ from app.db.models import (
     WorkspaceMember,
 )
 from app.db.session import SessionLocal
+from app.services.feedback_service import hash_device_token
 
 RECIPE_SEED_PATH = Path(__file__).resolve().parents[4] / "data" / "seed" / "recipes.json"
+
+# 演示终端（评分终端设计 §3）：明文令牌仅在种子输出展示，服务端只存哈希
+DEMO_KIOSK_DEVICE_ID = "kiosk-demo-01"
+DEMO_KIOSK_TOKEN = "demo-kiosk-token"
 
 INGREDIENTS: list[tuple[str, str, str, str]] = [
     # (key, name, category, default_unit)
@@ -165,6 +171,18 @@ def seed_demo_data() -> dict[str, int]:
             meal_service.service_date = tomorrow
             meal_service.expected_diners = 120
 
+        # 演示 Kiosk 终端（绑定总部食堂，令牌哈希落库）
+        kiosk = session.scalar(
+            select(KioskDevice).where(KioskDevice.device_id == DEMO_KIOSK_DEVICE_ID)
+        )
+        if kiosk is None:
+            kiosk = KioskDevice(device_id=DEMO_KIOSK_DEVICE_ID)
+            session.add(kiosk)
+        kiosk.workspace_id = workspace.id
+        kiosk.site_id = site.id
+        kiosk.token_hash = hash_device_token(DEMO_KIOSK_TOKEN)
+        kiosk.status = "active"
+
         # 食材主数据
         ingredients: dict[str, Ingredient] = {}
         for key, name, category, unit in INGREDIENTS:
@@ -259,6 +277,7 @@ def main() -> None:
     counts = seed_demo_data()
     print(f"种子数据完成：{counts['recipes']} 道菜谱，{counts['ingredients']} 种食材。")
     print("演示场景：示例机关食堂 / 总部食堂 / 明日午餐 120 人 / 临期番茄 / 花生过敏硬过滤。")
+    print(f"演示 Kiosk 设备 {DEMO_KIOSK_DEVICE_ID} 令牌：{DEMO_KIOSK_TOKEN}（请求头 X-Kiosk-Token）。")
 
 
 if __name__ == "__main__":

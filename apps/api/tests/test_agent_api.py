@@ -43,6 +43,9 @@ def test_create_and_revise_agent_run() -> None:
         # 测试环境屏蔽模型后必须可见规则基线提示
         assert any("规则基线" in warning for warning in body["warnings"])
 
+        # 食堂档案预置限制必须明示来源（与本次输入无关）
+        assert set(body["workspace_restrictions"]) == {"过敏原：花生米", "忌口：香菜"}
+
         # 运行记录与工具轨迹落库
         with SessionLocal() as session:
             row = session.get(AgentRun, body["id"])

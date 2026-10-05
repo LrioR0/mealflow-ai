@@ -15,6 +15,7 @@ from app.db.models import (
     Feedback,
     Ingredient,
     InventoryItem,
+    MealPlan,
     MealService,
     Recipe,
     RecipeIngredient,
@@ -71,6 +72,15 @@ class RecipeContext:
 
 
 @dataclass
+class DishFeedbackStats:
+    """单道菜的历史反馈聚合（来自包含该菜的已保存菜单计划）。"""
+
+    avg_rating: float
+    sample_count: int
+    top_tags: list[str] = field(default_factory=list)
+
+
+@dataclass
 class PlanningContext:
     workspace_id: str
     workspace_name: str
@@ -86,6 +96,9 @@ class PlanningContext:
     feedback_count: int
     feedback_avg_rating: float | None
     feedback_top_tags: list[str]
+    # 数据字典：用餐限制区分 allergy / dislike，均进入硬过滤；用于向管理员解释来源
+    restriction_types: dict[str, str] = field(default_factory=dict)
+    dish_feedback: dict[str, DishFeedbackStats] = field(default_factory=dict)
 
     def expiring_keys(self, today: date) -> set[str]:
         return {line.key for line in self.inventory if line.is_expiring(today)}
@@ -170,25 +183,51 @@ def load_planning_context(
             )
         )
 
-    # 用餐限制（过敏原与忌口，硬过滤）
-    excluded_keys = list(
-        session.scalars(
-            select(DietaryRestriction.ingredient_key).where(
-                DietaryRestriction.workspace_id == workspace.id
-            )
+    # 用餐限制（过敏原与忌口，硬过滤；保留类型用于解释来源）
+    restriction_pairs = session.execute(
+        select(DietaryRestriction.ingredient_key, DietaryRestriction.type).where(
+            DietaryRestriction.workspace_id == workspace.id
         )
-    )
+    ).all()
+    excluded_keys = [key for key, _ in restriction_pairs]
+    restriction_types = dict(restriction_pairs)
 
-    # 历史反馈摘要（Day 3 完整聚合，当前仅读取规模）
-    feedback_rows = session.scalars(select(Feedback)).all()
-    feedback_count = len(feedback_rows)
-    ratings = [row.rating for row in feedback_rows]
-    avg_rating = sum(ratings) / len(ratings) if ratings else None
+    # 历史反馈聚合（按餐次与菜品；可疑批次只作提示，不进入聚合）
+    feedback_rows = session.execute(
+        select(Feedback, MealPlan)
+        .join(MealPlan, MealPlan.id == Feedback.meal_plan_id)
+        .where(
+            Feedback.meal_service_id == meal_service.id,
+            Feedback.is_suspicious == False,  # noqa: E712 —— 可疑批次不参与统计
+        )
+    ).all()
+
+    ratings: list[int] = []
     tag_counter: dict[str, int] = {}
-    for row in feedback_rows:
+    dish_ratings: dict[str, list[int]] = {}
+    dish_tags: dict[str, dict[str, int]] = {}
+    for row, plan in feedback_rows:
+        ratings.append(row.rating)
         for tag in row.tags or []:
             tag_counter[tag] = tag_counter.get(tag, 0) + 1
+        for dish in (item["name"] for item in plan.items or []):
+            dish_ratings.setdefault(dish, []).append(row.rating)
+            for tag in row.tags or []:
+                dish_tags.setdefault(dish, {})
+                dish_tags[dish][tag] = dish_tags[dish].get(tag, 0) + 1
+    avg_rating = sum(ratings) / len(ratings) if ratings else None
     top_tags = [tag for tag, _ in sorted(tag_counter.items(), key=lambda kv: -kv[1])[:3]]
+    dish_feedback = {
+        dish: DishFeedbackStats(
+            avg_rating=round(sum(dish_rating_list) / len(dish_rating_list), 2),
+            sample_count=len(dish_rating_list),
+            top_tags=[
+                tag
+                for tag, _ in sorted(dish_tags.get(dish, {}).items(), key=lambda kv: -kv[1])[:3]
+            ],
+        )
+        for dish, dish_rating_list in dish_ratings.items()
+    }
 
     return PlanningContext(
         workspace_id=workspace.id,
@@ -202,7 +241,9 @@ def load_planning_context(
         inventory=inventory,
         recipes=recipes,
         excluded_keys=excluded_keys,
-        feedback_count=feedback_count,
+        restriction_types=restriction_types,
+        feedback_count=len(ratings),
         feedback_avg_rating=avg_rating,
         feedback_top_tags=top_tags,
+        dish_feedback=dish_feedback,
     )

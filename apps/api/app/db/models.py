@@ -185,13 +185,22 @@ class MealPlan(TimestampMixin, Base):
     items: Mapped[list[dict]] = mapped_column(JSON, default=list)
     procurement_list: Mapped[list[dict]] = mapped_column(JSON, default=list)
     estimated_cost_cents: Mapped[int] = mapped_column(Integer, default=0)
+    # 数据字典：保存生成时的解释快照（约束与评分拆解），发布后不再变化
+    constraints_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(32), default="draft")
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # api.md：发布接口必须使用 Idempotency-Key，同键重放返回同一结果
+    publish_idempotency_key: Mapped[str | None] = mapped_column(
+        String(80), unique=True, nullable=True
+    )
 
 
 class KioskDevice(TimestampMixin, Base):
     __tablename__ = "kiosk_devices"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    # 数据字典必填字段：device_id 标识物理终端，明文令牌只在注册时展示一次
+    device_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     site_id: Mapped[str] = mapped_column(ForeignKey("sites.id"), index=True)
     token_hash: Mapped[str] = mapped_column(String(255))
@@ -211,3 +220,5 @@ class Feedback(TimestampMixin, Base):
     comment: Mapped[str | None] = mapped_column(String(300), nullable=True)
     leftover_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
     is_suspicious: Mapped[bool] = mapped_column(Boolean, default=False)
+    # api.md：反馈请求携带幂等键，同键重放不产生重复记录
+    idempotency_key: Mapped[str | None] = mapped_column(String(80), index=True, nullable=True)

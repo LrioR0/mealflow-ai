@@ -63,6 +63,8 @@ class AgentRunView(BaseModel):
     tool_trace: list[ToolTraceView]
     options: list[MenuOption]
     warnings: list[str] = Field(default_factory=list)
+    # 食堂档案预置的用餐限制（如 过敏原：花生米），硬过滤来源与本次输入无关
+    workspace_restrictions: list[str] = Field(default_factory=list)
     approval_status: str = "not_requested"
     provider: str | None = None
     model: str | None = None

@@ -6,13 +6,15 @@ from app.db.models import (
     DietaryRestriction,
     Ingredient,
     InventoryItem,
+    KioskDevice,
     MealService,
     Recipe,
     User,
     Workspace,
 )
-from app.db.seed import seed_demo_data
+from app.db.seed import DEMO_KIOSK_TOKEN, seed_demo_data
 from app.db.session import SessionLocal
+from app.services.feedback_service import hash_device_token
 
 
 def test_seed_is_idempotent_and_complete() -> None:
@@ -63,3 +65,18 @@ def test_seed_recipes_are_traceable() -> None:
         for recipe in recipes:
             assert recipe.source_name, recipe.name
             assert recipe.license_note, recipe.name
+
+
+def test_seed_creates_demo_kiosk_device() -> None:
+    """评分终端设计：终端绑定站点，服务端只存令牌哈希。"""
+    seed_demo_data()
+
+    with SessionLocal() as session:
+        device = session.scalar(
+            select(KioskDevice).where(KioskDevice.device_id == "kiosk-demo-01")
+        )
+        assert device is not None
+        assert device.workspace_id == "demo-workspace"
+        assert device.site_id == "demo-site"
+        assert device.token_hash == hash_device_token(DEMO_KIOSK_TOKEN)
+        assert device.status == "active"

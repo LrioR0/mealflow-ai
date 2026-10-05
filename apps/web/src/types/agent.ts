@@ -35,6 +35,8 @@ export interface AgentRun {
   tool_trace: ToolTrace[]
   options: MenuOption[]
   warnings: string[]
+  /** 食堂档案预置的用餐限制（如 过敏原：花生米），与本次输入无关 */
+  workspace_restrictions: string[]
   approval_status: string
   provider?: string | null
   model?: string | null
