@@ -82,3 +82,26 @@ def test_create_run_with_unknown_scope_returns_400() -> None:
             },
         )
     assert created.status_code == 400
+
+
+def test_latest_run_endpoint_returns_most_recent_run() -> None:
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/agent/runs",
+            json={
+                "workspace_id": "demo-workspace",
+                "site_id": "demo-site",
+                "meal_service_id": "demo-lunch",
+                "request_text": "明天午餐 120 人，预算 900 元",
+            },
+        )
+        assert created.status_code == 201
+
+        latest = client.get("/api/v1/agent/runs/latest")
+
+    assert latest.status_code == 200
+    body = latest.json()
+    assert body["id"] == created.json()["id"]
+    # 采购页依赖的三方案与缺口数据随最新运行一起返回
+    assert body["options"]
+    assert body["options"][0]["procurement_list"]

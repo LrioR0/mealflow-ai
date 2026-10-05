@@ -5,7 +5,13 @@ from app.schemas.agent import (
     CreateAgentRunRequest,
     ReviseAgentRunRequest,
 )
-from app.services.agent_service import ScopeNotFoundError, create_run, get_run, revise_run
+from app.services.agent_service import (
+    ScopeNotFoundError,
+    create_run,
+    get_latest_run,
+    get_run,
+    revise_run,
+)
 
 router = APIRouter(prefix="/agent/runs", tags=["agent"])
 
@@ -19,6 +25,15 @@ async def create_agent_run(payload: CreateAgentRunRequest) -> AgentRunView:
         )
     except ScopeNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+# 固定路径必须先于 /{run_id} 注册，否则 "latest" 会被当作运行 ID 匹配
+@router.get("/latest", response_model=AgentRunView)
+def get_latest_agent_run() -> AgentRunView:
+    run = get_latest_run()
+    if run is None:
+        raise HTTPException(status_code=404, detail="No agent runs yet")
+    return run
 
 
 @router.get("/{run_id}", response_model=AgentRunView)

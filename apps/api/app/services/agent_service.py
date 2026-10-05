@@ -371,6 +371,14 @@ def get_run(run_id: str) -> AgentRunView | None:
         return _to_view(row)
 
 
+def get_latest_run() -> AgentRunView | None:
+    with SessionLocal() as session:
+        row = session.query(AgentRun).order_by(AgentRun.created_at.desc()).first()
+        if row is None:
+            return None
+        return _to_view(row)
+
+
 async def revise_run(
     run_id: str, expected_diners: int | None, budget_limit_cents: int | None
 ) -> AgentRunView | None:
