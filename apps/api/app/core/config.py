@@ -1,8 +1,14 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# 仓库根目录（apps/api/app/core/config.py -> 上五级，与 seed.py 的 parents[4] 一致）。
+# 数据库等相对路径统一锚定到这里，避免从 apps/api 或 IDE 启动时
+# 解析成 apps/api/data/local 下的另一份副本，导致两人看到不同数据。
+REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 class Settings(BaseSettings):
@@ -27,6 +33,15 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 30
     agent_max_steps: int = 12
     kiosk_token_secret: str = "replace-in-real-environment"
+
+    @field_validator("database_url", mode="after")
+    @classmethod
+    def anchor_sqlite_path(cls, value: str) -> str:
+        """把 sqlite:///./xxx 形式的相对路径锚定到仓库根目录，保证只有一个共享库。"""
+        prefix = "sqlite:///./"
+        if value.startswith(prefix):
+            return f"sqlite:///{(REPO_ROOT / value.removeprefix(prefix)).as_posix()}"
+        return value
 
     @field_validator("cors_origins", mode="before")
     @classmethod
