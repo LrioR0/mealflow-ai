@@ -37,7 +37,7 @@ const allMenus: Array<{ label: string; icon: unknown; index?: string }> = [
   { index: '/admin/procurement', label: '采购清单', icon: ShoppingCart },
   { index: '/admin/cooking-history', label: '下厨足迹', icon: Timer },
   { index: '/admin/members', label: '人员信息', icon: User },
-  { label: '懒人宝典', icon: MagicStick },
+  { index: '/admin/cookbook', label: '懒人宝典', icon: MagicStick },
   { label: '家庭档案', icon: House },
   { label: '系统设置', icon: Setting },
 ]

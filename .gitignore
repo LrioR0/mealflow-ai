@@ -148,3 +148,5 @@ apps/web/dist/
 *.sqlite
 *.sqlite3
 data/local/
+apps/api/data/
+*.sqlite3.bak-*

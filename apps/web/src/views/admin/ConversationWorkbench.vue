@@ -2,6 +2,7 @@
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { generateProcurement } from '../../composables/procurement'
+import { useAgentHandoffStore } from '../../stores/agentHandoff'
 
 import { Check, User } from '@element-plus/icons-vue'
 
@@ -129,7 +130,15 @@ function restoreChatScroll() {
   })
 }
 
+const agentHandoff = useAgentHandoffStore()
+
 onActivated(() => {
+  // 懒人宝典等页面跳转过来时,把待填文本放入输入框(只填充,不自动发送)
+  const pendingText = agentHandoff.consume()
+  if (pendingText) {
+    input.value = pendingText
+    ElMessage({ message: '已把需求填入输入框,确认后发送即可', type: 'success', grouping: true })
+  }
   void loadHousehold()
   restoreChatScroll()
 })
