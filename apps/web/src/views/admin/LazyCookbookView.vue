@@ -1,0 +1,592 @@
+<script setup lang="ts">
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { ArrowDown, Refresh, Search } from '@element-plus/icons-vue'
+
+import RecipeCard from '../../components/RecipeCard.vue'
+import { useAgentHandoffStore } from '../../stores/agentHandoff'
+import {
+  CATEGORY_ORDER,
+  DIFFICULTY_OPTIONS,
+  INGREDIENT_GROUPS,
+  MATCH_MODES,
+  SORT_OPTIONS,
+  TOOL_OPTIONS,
+  BIG_POT_HINT,
+  filterCookbook,
+  loadRecipes,
+  matchByIngredients,
+  type MatchMode,
+  type Recipe,
+  type SortKey,
+} from '../../composables/recipeBook'
+
+defineOptions({ name: 'LazyCookbookView' })
+
+const PAGE_SIZE = 24
+
+const router = useRouter()
+const agentHandoff = useAgentHandoffStore()
+
+const recipes = ref<Recipe[]>([])
+const loading = ref(true)
+const errorMessage = ref('')
+const activeTab = ref<'all' | 'ingredients'>('all')
+
+// ===== Tab1 菜谱大全 =====
+const keyword = ref('')
+const category = ref('全部')
+const difficulties = ref<string[]>([])
+const heatRange = ref<[number, number]>([0, 9999])
+const heatSliderBounds = ref<[number, number]>([0, 9999])
+const sort = ref<SortKey>('default')
+const page1 = ref(1)
+const openSections = reactive({ difficulty: true, heat: true, sort: false })
+
+// ===== Tab2 按食材找菜 =====
+const selectedIngredients = ref<string[]>([])
+const selectedTools = ref<string[]>([])
+const matchMode = ref<MatchMode>('fuzzy')
+const page2 = ref(1)
+
+onMounted(async () => {
+  try {
+    recipes.value = await loadRecipes()
+    initHeatBounds()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '菜谱数据加载失败'
+  } finally {
+    loading.value = false
+  }
+})
+
+function initHeatBounds() {
+  const heats = recipes.value
+    .map((recipe) => recipe.heat)
+    .filter((heat): heat is number => heat !== null)
+  if (!heats.length) return
+  const sliderMin = Math.floor(Math.min(...heats) / 10) * 10
+  const sliderMax = Math.ceil(Math.max(...heats) / 10) * 10
+  heatSliderBounds.value = [sliderMin, sliderMax]
+  heatRange.value = [sliderMin, sliderMax]
+}
+
+const categoryOptions = computed(() => {
+  const counts = new Map<string, number>()
+  for (const recipe of recipes.value) {
+    counts.set(recipe.category, (counts.get(recipe.category) ?? 0) + 1)
+  }
+  const ordered = CATEGORY_ORDER.filter((name) => counts.has(name)).map((name) => ({
+    name,
+    count: counts.get(name) ?? 0,
+  }))
+  for (const [name, count] of counts) {
+    if (!CATEGORY_ORDER.includes(name)) ordered.push({ name, count })
+  }
+  return [{ name: '全部', count: recipes.value.length }, ...ordered]
+})
+
+const heatIsFullRange = computed(
+  () =>
+    heatRange.value[0] === heatSliderBounds.value[0] &&
+    heatRange.value[1] === heatSliderBounds.value[1],
+)
+
+const tab1Filtered = computed(() =>
+  filterCookbook(recipes.value, {
+    keyword: keyword.value,
+    category: category.value,
+    difficulties: difficulties.value,
+    heatRange: heatIsFullRange.value ? null : heatRange.value,
+    sort: sort.value,
+  }),
+)
+const tab1Paged = computed(() =>
+  tab1Filtered.value.slice((page1.value - 1) * PAGE_SIZE, page1.value * PAGE_SIZE),
+)
+
+const tab2Matched = computed(() =>
+  matchByIngredients(recipes.value, selectedIngredients.value, matchMode.value),
+)
+const tab2Paged = computed(() =>
+  tab2Matched.value.slice((page2.value - 1) * PAGE_SIZE, page2.value * PAGE_SIZE),
+)
+
+watch([keyword, category, difficulties, heatRange, sort], () => {
+  page1.value = 1
+})
+watch([selectedIngredients, matchMode], () => {
+  page2.value = 1
+})
+
+function resetTab1Filters() {
+  keyword.value = ''
+  category.value = '全部'
+  difficulties.value = []
+  heatRange.value = [heatSliderBounds.value[0], heatSliderBounds.value[1]]
+  sort.value = 'default'
+}
+
+function clearTab2Selection() {
+  selectedIngredients.value = []
+  selectedTools.value = []
+}
+
+// 智能配餐跳转暂未开放:点击仅提示,后续接入时恢复 agentHandoff 跳转
+function sendRecipeToAgent() {
+  ElMessage.info('该功能未开发,敬请期待 ✨')
+}
+
+function sendIngredientsToAgent() {
+  if (!selectedIngredients.value.length) {
+    ElMessage.warning('请先勾选家里现有的食材')
+    return
+  }
+  const parts = [`家里现有食材：${selectedIngredients.value.join('、')}。`]
+  if (selectedTools.value.length) {
+    parts.push(`可用厨具：${selectedTools.value.join('、')}。`)
+  }
+  parts.push('请基于这些现有食材，推荐能做的菜。')
+  agentHandoff.stage(parts.join(''))
+  void router.push('/admin/agent')
+}
+</script>
+
+<template>
+  <section class="cookbook-page">
+    <header class="page-hero">
+      <div>
+        <span class="eyebrow">LAZY COOKBOOK</span>
+        <h2>懒人宝典</h2>
+        <p>原版菜谱视频库:筛选找菜、看原版视频,或一键把需求交给智能配餐 Agent 定制。</p>
+      </div>
+      <div class="hero-actions">
+        <span class="data-note">共 {{ recipes.length }} 道菜谱</span>
+      </div>
+    </header>
+
+    <div class="allergy-notice">
+      ⚠️ 本页面展示原版菜谱，未自动适配家庭成员过敏原、忌口，如需个性化方案请点击按钮交给智能配餐Agent处理。
+    </div>
+
+    <nav class="cookbook-tabs">
+      <button type="button" :class="{ active: activeTab === 'all' }" @click="activeTab = 'all'">
+        菜谱大全
+      </button>
+      <button
+        type="button"
+        :class="{ active: activeTab === 'ingredients' }"
+        @click="activeTab = 'ingredients'"
+      >
+        按食材找菜
+      </button>
+    </nav>
+
+    <div v-if="loading" class="state-block">菜谱加载中…</div>
+    <div v-else-if="errorMessage" class="state-block error">{{ errorMessage }}</div>
+
+    <div v-else class="cookbook-body">
+      <!-- ===== Tab1 菜谱大全 ===== -->
+      <div v-show="activeTab === 'all'" class="tab-layout">
+        <aside class="filter-panel">
+          <div class="filter-group">
+            <div class="filter-title">菜谱分类</div>
+            <div class="category-list">
+              <button
+                v-for="option in categoryOptions"
+                :key="option.name"
+                type="button"
+                :class="{ active: category === option.name }"
+                @click="category = option.name"
+              >
+                <span>{{ option.name }}</span>
+                <small>{{ option.count }}</small>
+              </button>
+            </div>
+          </div>
+
+          <div class="filter-group">
+            <button type="button" class="filter-title toggle" @click="openSections.difficulty = !openSections.difficulty">
+              难度筛选
+              <el-icon :class="{ open: openSections.difficulty }"><arrow-down /></el-icon>
+            </button>
+            <div v-show="openSections.difficulty" class="filter-content">
+              <el-checkbox-group v-model="difficulties" class="inline-checks">
+                <el-checkbox v-for="item in DIFFICULTY_OPTIONS" :key="item" :value="item" border size="small">
+                  {{ item }}
+                </el-checkbox>
+              </el-checkbox-group>
+            </div>
+          </div>
+
+          <div class="filter-group">
+            <button type="button" class="filter-title toggle" @click="openSections.heat = !openSections.heat">
+              热量区间
+              <el-icon :class="{ open: openSections.heat }"><arrow-down /></el-icon>
+            </button>
+            <div v-show="openSections.heat" class="filter-content">
+              <el-slider v-model="heatRange" range :min="heatSliderBounds[0]" :max="heatSliderBounds[1]" :step="10" />
+              <p class="heat-value">
+                {{ heatIsFullRange ? '热量不限' : `约 ${heatRange[0]} ~ ${heatRange[1]} kcal` }}
+              </p>
+            </div>
+          </div>
+
+          <div class="filter-group">
+            <button type="button" class="filter-title toggle" @click="openSections.sort = !openSections.sort">
+              排序方式
+              <el-icon :class="{ open: openSections.sort }"><arrow-down /></el-icon>
+            </button>
+            <div v-show="openSections.sort" class="filter-content">
+              <div class="sort-list">
+                <button
+                  v-for="option in SORT_OPTIONS"
+                  :key="option.key"
+                  type="button"
+                  :class="{ active: sort === option.key }"
+                  @click="sort = option.key"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <el-button class="reset-btn" :icon="Refresh" size="small" plain @click="resetTab1Filters">
+            清空筛选
+          </el-button>
+        </aside>
+
+        <div class="result-area">
+          <div class="result-bar">
+            <el-input
+              v-model="keyword"
+              class="search-input"
+              :prefix-icon="Search"
+              placeholder="按菜名搜索,如:番茄牛腩"
+              clearable
+            />
+            <span class="result-count">共 {{ tab1Filtered.length }} 道</span>
+          </div>
+          <div v-if="tab1Paged.length" class="card-grid">
+            <RecipeCard v-for="recipe in tab1Paged" :key="recipe.id" :recipe="recipe" @agent="sendRecipeToAgent" />
+          </div>
+          <div v-else class="state-block">🍳 没有找到匹配的菜谱,试试减少筛选条件或换个关键词</div>
+          <el-pagination
+            v-if="tab1Filtered.length > PAGE_SIZE"
+            v-model:current-page="page1"
+            class="pager"
+            background
+            layout="prev, pager, next"
+            :page-size="PAGE_SIZE"
+            :total="tab1Filtered.length"
+          />
+        </div>
+      </div>
+
+      <!-- ===== Tab2 按食材找菜 ===== -->
+      <div v-show="activeTab === 'ingredients'" class="tab2-layout">
+        <div class="pick-panel">
+          <div class="pick-section" v-for="group in INGREDIENT_GROUPS" :key="group.label">
+            <div class="pick-title">{{ group.label }}</div>
+            <el-checkbox-group v-model="selectedIngredients" class="inline-checks">
+              <el-checkbox v-for="item in group.items" :key="item" :value="item" border size="small">
+                {{ item }}
+              </el-checkbox>
+            </el-checkbox-group>
+          </div>
+
+          <div class="pick-section">
+            <div class="pick-title">厨具</div>
+            <el-checkbox-group v-model="selectedTools" class="inline-checks">
+              <el-checkbox v-for="tool in TOOL_OPTIONS" :key="tool" :value="tool" border size="small">
+                {{ tool }}
+              </el-checkbox>
+            </el-checkbox-group>
+            <p class="pick-hint">提示:{{ BIG_POT_HINT }};厨具不参与本地筛选,仅随食材一并告诉 Agent。</p>
+          </div>
+
+          <div class="pick-section">
+            <div class="pick-title">匹配模式</div>
+            <div class="mode-cards">
+              <button
+                v-for="mode in MATCH_MODES"
+                :key="mode.key"
+                type="button"
+                class="mode-card"
+                :class="{ active: matchMode === mode.key }"
+                @click="matchMode = mode.key"
+              >
+                <span class="mode-dot"></span>
+                <strong>{{ mode.label }}</strong>
+                <p>{{ mode.desc }}</p>
+              </button>
+            </div>
+          </div>
+
+          <div class="pick-actions">
+            <div class="pick-summary">
+              已选 <strong>{{ selectedIngredients.length }}</strong> 种食材
+              <template v-if="selectedTools.length">、{{ selectedTools.length }} 件厨具</template>
+              ,匹配到 <strong>{{ tab2Matched.length }}</strong> 道菜
+            </div>
+            <div class="pick-buttons">
+              <el-button size="small" :disabled="!selectedIngredients.length && !selectedTools.length" @click="clearTab2Selection">
+                清空勾选
+              </el-button>
+              <el-button type="primary" :disabled="!selectedIngredients.length" @click="sendIngredientsToAgent">
+                将选中食材传给Agent
+              </el-button>
+            </div>
+          </div>
+        </div>
+
+        <div class="result-area">
+          <div v-if="tab2Paged.length" class="card-grid">
+            <RecipeCard v-for="recipe in tab2Paged" :key="recipe.id" :recipe="recipe" @agent="sendRecipeToAgent" />
+          </div>
+          <div v-else class="state-block">🍳 没有匹配的菜谱,多勾几种食材或换成模糊匹配试试</div>
+          <el-pagination
+            v-if="tab2Matched.length > PAGE_SIZE"
+            v-model:current-page="page2"
+            class="pager"
+            background
+            layout="prev, pager, next"
+            :page-size="PAGE_SIZE"
+            :total="tab2Matched.length"
+          />
+        </div>
+      </div>
+    </div>
+  </section>
+</template>
+
+<style scoped>
+/* 页面内 EP 组件主色统一改为系统深绿,不影响其他页面 */
+.cookbook-page {
+  --el-color-primary: var(--green);
+  --el-color-primary-light-3: #2e6a61;
+  --el-color-primary-light-5: #4d857c;
+  --el-color-primary-light-7: #93b3ad;
+  --el-color-primary-light-8: #b6ccc7;
+  --el-color-primary-light-9: #e7f2ee;
+  --el-color-primary-dark-2: #0c3d37;
+  width: 100%;
+  max-width: 1250px;
+  height: calc(100vh - 118px);
+  min-height: 0;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.page-hero { display: flex; justify-content: space-between; align-items: flex-end; gap: 18px; }
+.page-hero h2 { margin: 4px 0 0; font-family: Georgia, 'Songti SC', serif; font-size: 25px; }
+.page-hero p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.data-note { color: var(--muted); font-size: 13px; }
+
+.allergy-notice {
+  margin-top: 14px;
+  padding: 9px 14px;
+  border: 1px solid #e0bd73;
+  background: #fffaf0;
+  border-radius: 10px;
+  color: #a15b21;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.cookbook-tabs { display: flex; gap: 8px; margin: 14px 0 0; }
+.cookbook-tabs button {
+  padding: 8px 22px;
+  border: 1px solid var(--border);
+  border-radius: 10px 10px 0 0;
+  border-bottom: 0;
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  transition: 0.16s ease;
+}
+.cookbook-tabs button.active {
+  background: #fff;
+  color: var(--green);
+  box-shadow: 0 -3px 10px rgba(33, 60, 54, 0.05);
+}
+
+.cookbook-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+/* ===== Tab1:左侧筛选 + 右侧结果 ===== */
+.tab-layout {
+  display: grid;
+  grid-template-columns: 232px 1fr;
+  gap: 18px;
+  align-items: start;
+}
+.filter-panel {
+  position: sticky;
+  top: 0;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+.filter-group { border-bottom: 1px solid #eef0ec; padding-bottom: 12px; }
+.filter-group:last-of-type { border-bottom: 0; padding-bottom: 0; }
+.filter-title {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.filter-title .el-icon { transition: transform 0.18s ease; color: var(--muted); }
+.filter-title .el-icon.open { transform: rotate(180deg); }
+.filter-content { margin-top: 10px; }
+
+.category-list { display: grid; gap: 4px; margin-top: 10px; }
+.category-list button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: #3d524c;
+  font-size: 13px;
+  transition: 0.14s ease;
+}
+.category-list button:hover { background: #f1f5f1; }
+.category-list button.active { background: var(--green); color: #fff; font-weight: 650; }
+.category-list small { color: inherit; opacity: 0.62; font-variant-numeric: tabular-nums; }
+
+.inline-checks { display: flex; flex-wrap: wrap; gap: 6px; }
+.inline-checks :deep(.el-checkbox) { margin-right: 0; --el-checkbox-checked-bg-color: var(--green); --el-checkbox-checked-input-border-color: var(--green); }
+.inline-checks :deep(.el-checkbox.el-checkbox--border) { padding: 4px 9px; border-radius: 8px; height: auto; }
+.inline-checks :deep(.el-checkbox__label) { font-size: 12.5px; padding-left: 6px; }
+
+.heat-value { margin: 8px 0 0; color: var(--muted); font-size: 12px; text-align: center; }
+
+.sort-list { display: grid; gap: 4px; }
+.sort-list button {
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+  color: #3d524c;
+  font-size: 13px;
+  transition: 0.14s ease;
+}
+.sort-list button:hover { background: #f1f5f1; }
+.sort-list button.active { background: #e7f2ee; border-color: var(--green-2); color: var(--green); font-weight: 650; }
+
+.reset-btn { width: 100%; }
+
+/* ===== 结果区 ===== */
+.result-area { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.result-bar { display: flex; align-items: center; gap: 12px; }
+.search-input { width: 320px; }
+.result-count { color: var(--muted); font-size: 13px; }
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(288px, 1fr));
+  gap: 14px;
+}
+.pager { justify-content: center; }
+
+.state-block {
+  padding: 46px 20px;
+  border: 1px dashed #bfc8c3;
+  border-radius: 14px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 13.5px;
+}
+.state-block.error { color: #a43c36; border-color: #dfb2ae; }
+
+/* ===== Tab2:食材/厨具/模式面板 ===== */
+.tab2-layout { display: grid; grid-template-columns: 1fr; gap: 16px; }
+.pick-panel {
+  display: grid;
+  gap: 16px;
+  padding: 16px 18px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+.pick-title { font-size: 13px; font-weight: 700; margin-bottom: 9px; }
+.pick-hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+
+.mode-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.mode-card {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: #fafaf6;
+  text-align: left;
+  transition: 0.16s ease;
+}
+.mode-card:hover { border-color: var(--green-2); }
+.mode-card.active {
+  border-color: var(--green);
+  background: #f0f7f3;
+  box-shadow: 0 6px 16px rgba(15, 76, 69, 0.08);
+}
+.mode-card strong { font-size: 13.5px; color: var(--ink); }
+.mode-card.active strong { color: var(--green); }
+.mode-card p { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.mode-dot {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1.5px solid #c3ccc7;
+  background: #fff;
+  transition: 0.16s ease;
+}
+.mode-card.active .mode-dot {
+  border-color: var(--green);
+  border-width: 4px;
+}
+
+.pick-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 2px;
+  border-top: 1px dashed #e3e7e2;
+}
+.pick-summary { color: var(--muted); font-size: 13px; }
+.pick-summary strong { color: var(--green); font-size: 15px; }
+.pick-buttons { display: flex; gap: 10px; }
+
+@media (max-width: 1100px) {
+  .tab-layout { grid-template-columns: 1fr; }
+  .filter-panel { position: static; }
+  .mode-cards { grid-template-columns: 1fr; }
+}
+</style>
