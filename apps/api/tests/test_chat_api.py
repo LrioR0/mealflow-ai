@@ -51,38 +51,25 @@ async def _client() -> AsyncClient:
 
 
 async def test_golden_sample_a_named_dish_with_budget() -> None:
-    """样例A:点名辣子鸡+2人+预算60块 → 全阶段事件、plan 必附菜单、预算进约束。"""
+    """样例A:点名辣子鸡+2人+预算60块 → 规划分支下线后走单菜做法分支(无 plan/步骤/追问)。"""
     client = await _client()
     async with client:
         events = await _stream(client, "明天中午想吃辣子鸡,我们俩,预算 60 块")
 
     names = [name for name, _ in events]
-    assert names[0] == "status"
     assert names[-1] == "done"
-    assert "text" in names and "plan" in names and "questions" in names
+    assert "text" in names
+    assert "plan" not in names
+    assert "questions" not in names
+    assert "status" not in names
     assert "thinking" not in names  # 未配置云端模型时无思维链事件
 
     done = _single(events, "done")
     assert done["session_id"]
-
-    plan = _single(events, "plan")
-    options = plan["options"]
-    assert options and options[0]["items"], "方案卡必须附菜单"
-    menu_names = {item["name"] for item in options[0]["items"]}
-    assert "辣子鸡" in menu_names, "点名菜必须进主推荐"
-    assert options[0]["estimated_cost_cents"] > 0
-
-    # 预算 60 块被识别为约束(6000 分)
-    run_constraints = plan["constraints"]
-    assert run_constraints["expected_diners"] == 2
-    assert run_constraints["budget_limit_cents"] == 6000
+    assert done["route"] == "kitchen_recipe"
 
     text = next(data for name, data in events if name == "text")["delta"]
     assert "辣子鸡" in text
-    assert "市区大型超市" in text, "金额必须带价格来源标注"
-
-    questions = _single(events, "questions")["items"]
-    assert questions
 
 
 def test_chat_route_separates_general_and_kitchen_topics() -> None:
@@ -142,20 +129,89 @@ async def test_unknown_recipe_uses_recipe_route_without_plan() -> None:
     assert done["search_query"] == "鲤鱼焙面"
 
 
-async def test_golden_sample_c_clarify_when_missing_info() -> None:
-    """样例C:信息不足时主动补问,不出方案。"""
+async def test_golden_sample_c_vague_request_goes_qa() -> None:
+    """样例C:规划分支下线后,模糊吃饭诉求按厨房问答对话处理,不再追问人数/预算。"""
     client = await _client()
     async with client:
         events = await _stream(client, "晚上吃点清淡的")
 
     names = [name for name, _ in events]
     assert "plan" not in names
-    questions = _single(events, "questions")
-    assert questions["needs_input"] is True
-    assert questions["items"]
+    assert "questions" not in names
+    assert "status" not in names
+    assert "text" in names
+    assert _single(events, "done")["route"] == "kitchen_qa"
 
-    text = _single(events, "text")["delta"]
-    assert "几个人" in text
+
+async def test_fuzzy_ingredient_search_returns_candidates() -> None:
+    """模糊查询:今晚想吃虾 → candidates 候选列表带过敏标注,无 run/步骤事件。"""
+    client = await _client()
+    async with client:
+        events = await _stream(client, "今晚想吃虾")
+
+    names = [name for name, _ in events]
+    assert "candidates" in names
+    assert "plan" not in names
+    assert "status" not in names
+    assert "text" in names
+    assert "thinking" in names  # 规则分支也给出真实执行步骤的思考过程
+    done = _single(events, "done")
+    assert done["route"] == "kitchen_recipe"
+    assert done["provider"] is None  # 列表是规则召回,不依赖模型
+
+    candidates = _single(events, "candidates")
+    assert candidates["query"] == "虾"
+    item_names = {item["name"] for item in candidates["items"]}
+    assert "虾仁炒蛋" in item_names
+    assert "白灼虾" in item_names
+    conflict = next(item for item in candidates["items"] if item["name"] == "白灼虾")
+    assert conflict["conflict_level"] == "forbidden"  # 对象虾过敏 → 红线标注
+
+    # 菜单列表统一带库存标注:虾仁炒蛋用冰箱的鸡蛋,虾仁不在库存如实标缺
+    egg_item = next(item for item in candidates["items"] if item["name"] == "虾仁炒蛋")
+    assert "鸡蛋" in egg_item["used_fridge"]
+    assert "虾仁" in egg_item["missing"]
+
+    text = next(data for name, data in events if name == "text")["delta"]
+    assert "虾" in text
+
+
+async def test_fuzzy_dish_name_takes_priority_over_ingredient() -> None:
+    """菜名精确命中优先:我想吃虾仁炒蛋 直接给做法,不发候选列表。"""
+    client = await _client()
+    async with client:
+        events = await _stream(client, "我想吃虾仁炒蛋")
+
+    names = [name for name, _ in events]
+    assert "candidates" not in names
+    assert "text" in names
+    assert _single(events, "done")["route"] == "kitchen_recipe"
+    text = next(data for name, data in events if name == "text")["delta"]
+    assert "虾仁炒蛋" in text
+
+
+async def test_inventory_menu_ranks_expiring_first() -> None:
+    """库存菜单:Agent 自读冰箱出候选,临期优先排序,标注用到的库存食材与缺口。"""
+    client = await _client()
+    async with client:
+        events = await _stream(client, "根据冰箱库存去生成一些菜单供我选，优先使用临期的")
+
+    names = [name for name, _ in events]
+    assert "candidates" in names
+    assert "plan" not in names
+    assert "status" not in names
+    assert "text" in names
+    assert "thinking" in names  # 库存菜单的思考过程(读取冰箱/排序依据)
+
+    candidates = _single(events, "candidates")
+    assert candidates["query"] == "冰箱库存"
+    first = candidates["items"][0]
+    assert first["expiring"] is True, "用到临期食材的菜必须排最前"
+    assert first["used_fridge"], "必须标注使用了冰箱的哪些食材"
+
+    text = next(data for name, data in events if name == "text")["delta"]
+    assert "临期" in text
+    assert _single(events, "done")["route"] == "kitchen_recipe"
 
 
 async def test_session_restore_after_chat() -> None:
@@ -174,13 +230,14 @@ async def test_session_restore_after_chat() -> None:
     assert "assistant" in roles
 
 
-async def test_confirm_intent_publishes_plan() -> None:
-    """确认链路:生成方案后说"就做这套",返回确认文本与采购信息。"""
+async def test_confirm_message_after_plan_removal() -> None:
+    """规划分支下线后,确认类消息按对话处理,不再触发方案确认/采购链路。"""
     client = await _client()
     async with client:
-        await _stream(client, "明天中午想吃辣子鸡,我们俩,预算 60 块")
         events = await _stream(client, "就做这套,确认")
 
-    text = _single(events, "text")["delta"]
-    assert "已确认" in text
-    assert "采购清单" in text or "冰箱现有食材" in text
+    names = [name for name, _ in events]
+    assert "plan" not in names
+    assert "status" not in names
+    assert "text" in names
+    assert _single(events, "done")["route"] == "kitchen_qa"

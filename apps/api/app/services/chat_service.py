@@ -8,6 +8,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from typing import AsyncIterator
 
 from sqlalchemy import select
@@ -227,6 +228,160 @@ def _dish_name_from_text(text: str) -> str:
     cleaned = re.sub(r"^(我想吃|我想做|我想要|想吃|想做|要做|做个|做一道|来个|来一份)\s*", "", cleaned)
     cleaned = re.sub(r"(怎么做|做法|的做法|给我做法).*?$", "", cleaned).strip(" ，,。！？?!")
     return cleaned or "这道菜"
+
+
+_FOOD_QUERY_STRIP_PATTERNS = (
+    # 后缀诉求与语气词
+    r"给(我|你)?(几个|一个|个)?(详细|具体)?(的)?(做法|方案|菜谱|教程|建议)",
+    r"几个(方案|菜|做法|建议)",
+    r"(吧|哈|呗|呀|啊|呢|哦|啦)+",
+    # 预算金额
+    r"(预算|花|不超过)?\s*\d+(\.\d+)?\s*(块钱|元|块)",
+    # 时间状语(日期词与时段词分开剥,避免「今晚虾」这类无时段组合漏剥)
+    r"((今|明|后|昨)天|(今|明|后)晚|明早|今晚)(早上|早晨|上午|中午|下午|傍晚|晚上|夜里|半夜)?",
+    r"^(早上|早晨|上午|中午|下午|傍晚|晚上|夜里|半夜)",
+    # 用餐人称
+    r"(我们俩|两个人|我俩|两人|大家|就我自己|我自己|我一个人|我一人|一个人|帮我)",
+    # 动词短语(放最后,避免先把「吃」从「想吃」里单独剥走)
+    r"(想吃点|想吃|想做个|想做|想来点|想要|要吃|要做|来一份|来份|来个|来点|做个|做一道|吃点|安排)",
+)
+
+
+def _extract_food_query(text: str) -> str:
+    """从口语里剥出核心食材/菜名词条:今晚想吃虾 → 虾。迭代清洗到稳定为止。"""
+    cleaned = text.strip()
+    for _ in range(6):
+        before = cleaned
+        for pattern in _FOOD_QUERY_STRIP_PATTERNS:
+            cleaned = re.sub(pattern, "", cleaned)
+        cleaned = cleaned.strip(" ，,。！？?！、;；:：\n")
+        if cleaned == before:
+            break
+    return cleaned
+
+
+def _key_name_map(context: PlanningContext) -> dict[str, str]:
+    """ingredient key → 中文名(库存+全部菜谱配料),用于把约束 summary 里裸露的 key 翻译成人话。"""
+    names: dict[str, str] = {line.key: line.name for line in context.inventory}
+    for recipe in context.recipes:
+        for line in recipe.ingredients:
+            names.setdefault(line.key, line.name)
+    return names
+
+
+def _fridge_usage(
+    recipe: RecipeContext, inv_keys: set[str], expiring: set[str]
+) -> tuple[list[str], list[str], list[str]]:
+    """返回(用到的库存食材名, 其中临期的, 缺的必需食材名)。可选配料不计入缺口。"""
+    used: list[str] = []
+    expiring_used: list[str] = []
+    missing: list[str] = []
+    for line in recipe.ingredients:
+        if line.key in inv_keys:
+            used.append(line.name)
+            if line.key in expiring:
+                expiring_used.append(line.name)
+        elif not line.optional:
+            missing.append(line.name)
+    return used, expiring_used, missing
+
+
+def _candidate_item(
+    recipe: RecipeContext,
+    context: PlanningContext,
+    key_names: dict[str, str],
+    used: list[str],
+    expiring_used: list[str],
+    missing: list[str],
+) -> dict:
+    conflict = _conflict_for(recipe, context)
+    conflict_summary = None
+    if conflict is not None:
+        conflict_summary = conflict[0].summary
+        key = conflict[0].ingredient_key
+        if key and key in key_names:
+            conflict_summary = conflict_summary.replace(key, key_names[key])
+    names = [line.name for line in recipe.ingredients]
+    return {
+        "recipe_id": recipe.id,
+        "name": recipe.name,
+        "ingredients_summary": "、".join(names[:4]) + ("等" if len(names) > 4 else ""),
+        "conflict_level": conflict[1] if conflict else None,
+        "conflict_summary": conflict_summary,
+        "expiring": bool(expiring_used),
+        "expiring_used": expiring_used,
+        "used_fridge": used,
+        "missing": missing,
+    }
+
+
+def _recall_recipes_by_ingredient(
+    query: str, context: PlanningContext
+) -> tuple[list[dict], int]:
+    """食材模糊召回:任一配料名与 query 双向包含即命中(虾↔虾仁)。
+
+    主料命中优先、临期食材加权;不做忌口过滤——冲突由 candidates 事件的
+    conflict 字段交给前端标注(展示不隐藏)。返回(前6条, 总命中数)。
+    """
+    term = query.strip()
+    if not term:
+        return [], 0
+    expiring = context.expiring_keys(date.today())
+    key_names = _key_name_map(context)
+    inv_keys = {line.key for line in context.inventory if line.quantity > 0}
+    scored: list[tuple[tuple[int, int, int], RecipeContext, list[str], list[str], list[str]]] = []
+    for recipe in context.recipes:
+        hit_lines = [line for line in recipe.ingredients if term in line.name or line.name in term]
+        if not hit_lines:
+            continue
+        main_hit = any(not line.optional for line in hit_lines)
+        used, expiring_used, missing = _fridge_usage(recipe, inv_keys, expiring)
+        score = (2 if main_hit else 1, 1 if expiring_used else 0, -len(hit_lines))
+        scored.append((score, recipe, used, expiring_used, missing))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    items = [
+        _candidate_item(recipe, context, key_names, used, expiring_used, missing)
+        for _, recipe, used, expiring_used, missing in scored[:6]
+    ]
+    return items, len(scored)
+
+
+def _looks_like_inventory_menu(text: str) -> bool:
+    """冰箱/库存 + 要菜单/能做什么类诉求 → 库存驱动菜单分支(Agent 自读冰箱)。"""
+    has_source = "冰箱" in text or "库存" in text
+    wants_menu = any(
+        term in text
+        for term in ("菜单", "什么菜", "能做", "做菜", "做饭", "做什么", "吃什么", "吃", "推荐", "生成", "选", "临期", "适合", "安排")
+    )
+    return has_source and wants_menu
+
+
+def _build_inventory_menu(context: PlanningContext) -> tuple[list[dict], int]:
+    """按冰箱库存出候选菜单:用到临期食材的排最前,库存覆盖度次之(缺口越少越前)。
+
+    只收录至少用到一种冰箱必需食材的菜;同样不做忌口过滤,仅标注。返回(前6条, 总数)。
+    """
+    expiring = context.expiring_keys(date.today())
+    key_names = _key_name_map(context)
+    inv_keys = {line.key for line in context.inventory if line.quantity > 0}
+    scored: list[tuple[tuple[int, float, int], RecipeContext, list[str], list[str], list[str]]] = []
+    for recipe in context.recipes:
+        used, expiring_used, missing = _fridge_usage(recipe, inv_keys, expiring)
+        required_hits = any(
+            line.key in inv_keys for line in recipe.ingredients if not line.optional
+        )
+        if not required_hits:
+            continue
+        required = [line for line in recipe.ingredients if not line.optional]
+        coverage = (len(required) - len(missing)) / len(required) if required else 1.0
+        score = (len(expiring_used), round(coverage, 2), len(used))
+        scored.append((score, recipe, used, expiring_used, missing))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    items = [
+        _candidate_item(recipe, context, key_names, used, expiring_used, missing)
+        for _, recipe, used, expiring_used, missing in scored[:6]
+    ]
+    return items, len(scored)
 
 
 def _generic_recipe_prompt(dish_name: str, context: PlanningContext) -> str:
@@ -577,6 +732,20 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         and not any(term in user_text for term in ("保存", "保鲜", "方案", "安排", "预算"))
     ):
         route = "kitchen_recipe"
+    if route in ("kitchen_plan", "kitchen_qa") and _looks_like_inventory_menu(user_text):
+        # 库存驱动菜单:Agent 自己读冰箱出候选列表,不再反问用户冰箱里有什么
+        route = "kitchen_inventory"
+    if route == "kitchen_plan":
+        # 配餐规划分支已下线(C端定位为对话式做菜助手):
+        # 有明确做菜意图的进单菜做法分支,其余按厨房问答对话处理
+        route = (
+            "kitchen_recipe"
+            if any(
+                term in user_text
+                for term in ("想吃", "想做", "要做", "做个", "做一道", "来个", "来一份", "怎么做", "做法")
+            )
+            else "kitchen_qa"
+        )
     if route == "general":
         # 普通话题不读取厨房上下文,不创建规划运行,也不发送 thinking/status/plan。
         text_parts: list[str] = []
@@ -677,18 +846,132 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
     latest_run_id = _latest_run_id(payload.workspace_id)
     intent = _detect_intent(user_text, context, has_previous_run=bool(latest_run_id))
 
+    if route == "kitchen_inventory":
+        # 库存菜单:纯规则生成(不依赖 LLM),临期优先;忌口只标注不过滤
+        menu_items, menu_total = _build_inventory_menu(context)
+        if menu_items:
+            today = date.today()
+            expiring_names = sorted(
+                line.name
+                for line in context.inventory
+                if line.quantity > 0 and line.key in context.expiring_keys(today)
+            )
+            in_stock = sum(1 for line in context.inventory if line.quantity > 0)
+            # 合成思考过程:真实的库存读取与排序依据(本地计算,不做人为延迟)
+            for chunk in (
+                f"【读取冰箱】{in_stock} 种食材在库"
+                + (f"，其中 {'、'.join(expiring_names)} {len(expiring_names)} 项临期" if expiring_names else ""),
+                f"【召回排序】按「临期使用数 → 库存覆盖度 → 用料数」从 {menu_total} 道库内菜挑出 {len(menu_items)} 道",
+                "【忌口检查】冲突只标注不过滤，决定权在你",
+            ):
+                yield _sse("thinking", {"delta": chunk + "\n"})
+            stock_names = [
+                f"{line.name}（临期）" if line.key in context.expiring_keys(today) else line.name
+                for line in context.inventory
+                if line.quantity > 0
+            ]
+            lead_text = (
+                "我看了下冰箱，现有："
+                + "、".join(stock_names)
+                + "。"
+                + f"结合库存给你挑了 {len(menu_items)} 道菜"
+                + (f"（共 {menu_total} 道，先展示最相关的 {len(menu_items)} 道）" if menu_total > len(menu_items) else "")
+                + "，用到临期食材的排在了前面，点击菜名查看按当前人数换算的做法。"
+                "标红的含你的过敏原、标黄的撞上当前忌口或状态，仅供参考，仍可查看。"
+            )
+            yield _sse(
+                "candidates",
+                {"query": "冰箱库存", "total": menu_total, "items": menu_items},
+            )
+        else:
+            lead_text = (
+                "我看了下冰箱，现有食材还凑不出菜谱库里的菜。"
+                "先补点货，或者直接告诉我你想吃的菜，我来给做法。"
+            )
+        yield _sse("text", {"delta": lead_text})
+        with SessionLocal() as session:
+            message = AgentChatMessage(
+                session_id=session_id,
+                role="assistant",
+                content=lead_text,
+                thinking_text=None,
+                run_id=None,
+            )
+            session.add(message)
+            session.commit()
+            message_id = message.id
+        yield _sse(
+            "done",
+            {
+                "session_id": session_id,
+                "message_id": message_id,
+                "needs_input": False,
+                "provider": None,
+                "route": "kitchen_recipe",
+            },
+        )
+        return
+
     if route == "kitchen_recipe" or _is_direct_recipe_request(user_text, intent):
         recipe = intent.named_recipes[0] if intent.named_recipes else None
         if recipe is None:
+            # 食材模糊查询:核心词命中配料(如「想吃虾」) → 发候选菜列表,由前端点击展开做法
+            fuzzy_query = _extract_food_query(user_text)
+            fuzzy_items, fuzzy_total = _recall_recipes_by_ingredient(fuzzy_query, context)
+            if fuzzy_items:
+                # 合成思考过程:把真实的规则执行步骤讲给用户(本地计算,不做人为延迟)
+                for chunk in (
+                    f"【理解需求】从你的话里提取想吃的食材：「{fuzzy_query}」",
+                    f"【模糊匹配】与 {len(context.recipes)} 道库内菜的配料双向匹配，命中 {fuzzy_total} 道，主料优先、临期加权",
+                    "【标注】库存使用与过敏/忌口冲突只提示不过滤，决定权在你",
+                ):
+                    yield _sse("thinking", {"delta": chunk + "\n"})
+                lead_text = (
+                    f"为你找到 {len(fuzzy_items)} 道含「{fuzzy_query}」的菜"
+                    + (f"（共 {fuzzy_total} 道，先展示最相关的 {len(fuzzy_items)} 道）" if fuzzy_total > len(fuzzy_items) else "")
+                    + "，点击菜名即可查看按当前人数换算的做法。"
+                    "标红的含你的过敏原、标黄的撞上当前忌口或状态，仅供参考，仍可查看。"
+                )
+                yield _sse(
+                    "candidates",
+                    {"query": fuzzy_query, "total": fuzzy_total, "items": fuzzy_items},
+                )
+                yield _sse("text", {"delta": lead_text})
+                with SessionLocal() as session:
+                    message = AgentChatMessage(
+                        session_id=session_id,
+                        role="assistant",
+                        content=lead_text,
+                        thinking_text=None,
+                        run_id=None,
+                    )
+                    session.add(message)
+                    session.commit()
+                    message_id = message.id
+                yield _sse(
+                    "done",
+                    {
+                        "session_id": session_id,
+                        "message_id": message_id,
+                        "needs_input": False,
+                        "provider": None,
+                        "route": "kitchen_recipe",
+                    },
+                )
+                return
             dish_name = _dish_name_from_text(user_text)
-            text_parts = []
+            text_parts: list[str] = []
+            thinking_parts: list[str] = []
             async for kind, delta in _llm_stream_text(
                 [
                     {"role": "system", "content": _generic_recipe_prompt(dish_name, context)},
                     {"role": "user", "content": user_text},
                 ]
             ):
-                if kind == "text" and delta:
+                if kind == "thinking" and delta:
+                    thinking_parts.append(delta)
+                    yield _sse("thinking", {"delta": delta})
+                elif kind == "text" and delta:
                     text_parts.append(delta)
                     yield _sse("text", {"delta": delta})
             full_text = "".join(text_parts) or _fallback_generic_recipe_text(dish_name)
@@ -699,7 +982,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                     session_id=session_id,
                     role="assistant",
                     content=full_text,
-                    thinking_text=None,
+                    thinking_text="".join(thinking_parts) or None,
                     run_id=None,
                 )
                 session.add(message)
@@ -718,6 +1001,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             diners = _extract_diners(user_text) or context.expected_diners
             conflict = _conflict_for(recipe, context)
             text_parts: list[str] = []
+            thinking_parts: list[str] = []
             if conflict is not None and conflict[1] == "forbidden":
                 full_text = (
                     f"这道{recipe.name}包含{conflict[0].summary}涉及的过敏原，"
@@ -731,7 +1015,10 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                         {"role": "user", "content": user_text},
                     ]
                 ):
-                    if kind == "text" and delta:
+                    if kind == "thinking" and delta:
+                        thinking_parts.append(delta)
+                        yield _sse("thinking", {"delta": delta})
+                    elif kind == "text" and delta:
                         text_parts.append(delta)
                         yield _sse("text", {"delta": delta})
                 if not text_parts:
@@ -752,7 +1039,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                     session_id=session_id,
                     role="assistant",
                     content=full_text,
-                    thinking_text=None,
+                    thinking_text="".join(thinking_parts) or None,
                     run_id=None,
                 )
                 session.add(message)
@@ -771,172 +1058,6 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             )
             return
 
-    run_view: AgentRunView | None = None
-    plan_text = ""
-    questions: list[str] = []
-    needs_input = False
-    plan_payload: dict | None = None
-
-    if intent.kind == "confirm":
-        strategy = intent.strategy or "expiring_first"
-        strategy_key = strategy
-        if strategy in ("临期优先", "原方案优先", "综合评估优先"):
-            mapping = {
-                "临期优先": "expiring_first",
-                "原方案优先": "original_first",
-                "综合评估优先": "balanced_first",
-            }
-            strategy_key = mapping[strategy]
-        from app.services import meal_plan_service
-
-        plan_view = meal_plan_service.confirm_plan(latest_run_id, strategy_key)
-        plan_text = _compose_confirm_text(plan_view)
-        questions = ["开始做饭吧", "看看采购清单"]
-    elif intent.kind == "create" and not intent.named_recipes and intent.diners is None and intent.budget_cents is None:
-        needs_input = True
-        constraint_detail = (
-            "；".join(constraint.summary for constraint in context.member_constraints)
-            or "全家当前没有生效的忌口或特殊事件"
-        )
-        plan_text = (
-            "好,先确认两件事:这餐几个人吃?有预算上限的话我一并算进成本和采购缺口里。"
-            "全家当前的饮食限制我记着呢:" + constraint_detail + "。"
-        )
-        questions = ["就我自己", "两个人都在", "预算 60 元"]
-    elif intent.kind == "modify" and latest_run_id:
-        from app.services import agent_service as _agent_service
-
-        run_view = await _agent_service.revise_run(
-            latest_run_id, intent.diners, intent.budget_cents
-        )
-        if run_view is None:
-            yield _sse("error", {"message": "找不到最近的方案运行", "fallback": True})
-            run_view = None
-        if run_view is not None:
-            _apply_named_dishes(run_view, context, intent.named_recipes)
-            for option in run_view.options:
-                option.warnings = _option_warnings(option, context)
-            plan_text = _compose_plan_text(run_view, context, intent.named_recipes)
-            questions = _alternative_questions(run_view, context)
-            plan_payload = run_view.model_dump()
-            for trace in run_view.tool_trace:
-                yield _sse(
-                    "status",
-                    {"step": trace.tool_name, "state": "done", "detail": trace.output_summary},
-                )
-    if intent.kind != "confirm" and not needs_input and (
-        intent.kind == "create" or (intent.kind == "modify" and run_view is None)
-    ):
-        # 工具步骤直播:on_step 回调把每个工具的 开始/完成 实时推入队列,
-        # 配合 STEP_PACING 节奏控制让每一步可感知(数据真实,节奏为演示效果)。
-        step_queue: asyncio.Queue = asyncio.Queue()
-
-        def on_step(state: str, tool_name: str, detail: str) -> None:
-            step_queue.put_nowait(("status", {"step": tool_name, "state": state, "detail": detail}))
-
-        def on_thinking(delta: str) -> None:
-            step_queue.put_nowait(("thinking", {"delta": delta}))
-
-        normalized = _normalize_request_text(payload.message)
-        run_task = asyncio.create_task(
-            agent_service.create_run(
-                payload.workspace_id,
-                payload.site_id,
-                payload.meal_service_id,
-                normalized,
-                on_step=on_step,
-                on_thinking=on_thinking,
-            )
-        )
-        while not (run_task.done() and step_queue.empty()):
-            try:
-                event_kind, event_data = step_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                await asyncio.sleep(0.05)
-                continue
-            yield _sse(event_kind, event_data)
-            # 思维链实时流动不加节奏;工具步骤之间加节奏让"进行中→完成"可感知
-            if event_kind == "status":
-                await asyncio.sleep(STEP_PACING)
-        try:
-            run_view = run_task.result()
-        except Exception as exc:  # noqa: BLE001 —— 任何规划失败都降级为错误事件
-            yield _sse("error", {"message": f"规划失败:{exc}", "fallback": True})
-            run_view = None
-        if run_view is not None:
-            if intent.diners or intent.budget_cents:
-                constraints = run_view.constraints.model_copy(deep=True)
-                if intent.diners:
-                    constraints.expected_diners = intent.diners
-                if intent.budget_cents:
-                    constraints.budget_limit_cents = intent.budget_cents
-                run_view.constraints = constraints
-            _apply_named_dishes(run_view, context, intent.named_recipes)
-            for option in run_view.options:
-                option.warnings = _option_warnings(option, context)
-            plan_text = _compose_plan_text(run_view, context, intent.named_recipes)
-            questions = _alternative_questions(run_view, context)
-            plan_payload = run_view.model_dump()
-            _persist_options(run_view.id, run_view.options)
-
-    # 回答流式:有云端模型时逐字输出;规则模式一次性给出(前端本地补打字机)
-    llm_messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"用户说:{payload.message}\n\n规划结果:\n{plan_text}"},
-    ]
-    text_streamed = False
-    thinking_parts: list[str] = []
-    text_parts: list[str] = []
-    async for kind, delta in _llm_stream_text(llm_messages):
-        if kind == "__error__":
-            break
-        if kind == "thinking":
-            thinking_parts.append(delta)
-            yield _sse("thinking", {"delta": delta})
-        else:
-            text_streamed = True
-            text_parts.append(delta)
-            yield _sse("text", {"delta": delta})
-    if not text_streamed:
-        text_parts = [plan_text]
-        yield _sse("text", {"delta": plan_text})
-
-    full_text = "".join(text_parts) or plan_text
-
-    if plan_payload is not None:
-        # 菜单项附带菜谱 ID,前端展开食谱详情用
-        recipe_ids = {recipe.name: recipe.id for recipe in context.recipes}
-        for option in plan_payload["options"]:
-            for item in option["items"]:
-                item["recipe_id"] = recipe_ids.get(str(item.get("name")))
-        yield _sse("plan", plan_payload)
-    if questions:
-        yield _sse("questions", {"items": questions, "needs_input": needs_input})
-
-    # 持久化助手消息(含思维链回看与关联运行)
-    message_id = None
-    with SessionLocal() as session:
-        message = AgentChatMessage(
-            session_id=session_id,
-            role="assistant",
-            content=full_text,
-            thinking_text="".join(thinking_parts) or None,
-            run_id=run_view.id if run_view else None,
-        )
-        session.add(message)
-        session.commit()
-        session.flush()
-        message_id = message.id
-
-    yield _sse(
-        "done",
-        {
-            "session_id": session_id,
-            "message_id": message_id,
-            "needs_input": needs_input,
-            "provider": settings.llm_provider if text_streamed else None,
-        },
-    )
 
 
 def get_session_view(session_id: str) -> ChatSessionView | None:

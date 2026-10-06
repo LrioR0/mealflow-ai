@@ -1170,6 +1170,224 @@
       "source_name": "MealFlow 演示数据组（自制）",
       "source_url": "",
       "license_note": "自制演示数据，仅用于演示，可再分发"
+    },
+    {
+      "name": "白灼虾",
+      "servings": 2,
+      "duration_minutes": 10,
+      "kcal_per_serving": 180,
+      "estimated_cost_cents": 1500,
+      "tags": [
+        "清淡",
+        "快手",
+        "原味"
+      ],
+      "allergens": [
+        "虾"
+      ],
+      "steps": [
+        "水烧开，放姜片与少许油",
+        "下鲜虾灼 1.5 分钟至变红弯身",
+        "捞出过冰水更爽脆",
+        "配姜蓉生抽蘸食"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-06",
+      "ingredients": [
+        {
+          "key": "shrimp",
+          "quantity": 0.4,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "ginger",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": true
+        },
+        {
+          "key": "scallion",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": true
+        },
+        {
+          "key": "soy_sauce",
+          "quantity": 0.02,
+          "unit": "L",
+          "optional": true
+        }
+      ],
+      "taste_tags": [
+        "清淡",
+        "海鲜"
+      ]
+    },
+    {
+      "name": "香辣虾",
+      "servings": 2,
+      "duration_minutes": 20,
+      "kcal_per_serving": 260,
+      "estimated_cost_cents": 1800,
+      "tags": [
+        "下饭",
+        "重口味"
+      ],
+      "allergens": [
+        "虾"
+      ],
+      "steps": [
+        "热油煸香干辣椒、姜蒜",
+        "下鲜虾大火煎至变红",
+        "淋生抽翻炒裹匀",
+        "收汁撒葱花出锅"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-06",
+      "ingredients": [
+        {
+          "key": "shrimp",
+          "quantity": 0.4,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "dried_chili",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "garlic",
+          "quantity": 0.03,
+          "unit": "kg",
+          "optional": true
+        },
+        {
+          "key": "ginger",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": true
+        }
+      ],
+      "taste_tags": [
+        "辛辣",
+        "海鲜"
+      ]
+    },
+    {
+      "name": "番茄虾仁",
+      "servings": 2,
+      "duration_minutes": 18,
+      "kcal_per_serving": 210,
+      "estimated_cost_cents": 1500,
+      "tags": [
+        "低脂",
+        "下饭"
+      ],
+      "allergens": [
+        "虾",
+        "蛋"
+      ],
+      "steps": [
+        "虾仁用盐和淀粉抓匀腌 10 分钟",
+        "番茄去皮切块炒出沙",
+        "下虾仁滑炒变色",
+        "倒回番茄翻匀调味出锅"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-06",
+      "ingredients": [
+        {
+          "key": "shrimp",
+          "quantity": 0.25,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "tomato",
+          "quantity": 0.3,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "egg",
+          "quantity": 2,
+          "unit": "个",
+          "optional": true
+        },
+        {
+          "key": "starch",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": true
+        }
+      ],
+      "taste_tags": [
+        "清淡",
+        "海鲜"
+      ]
+    },
+    {
+      "name": "冬瓜虾仁汤",
+      "servings": 2,
+      "duration_minutes": 15,
+      "kcal_per_serving": 95,
+      "estimated_cost_cents": 800,
+      "tags": [
+        "清汤",
+        "低脂"
+      ],
+      "allergens": [
+        "虾"
+      ],
+      "steps": [
+        "冬瓜去皮切厚片",
+        "水开放姜片，下冬瓜煮至半透明",
+        "下虾仁煮 2 分钟",
+        "加盐调味，撒葱花出锅"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-06",
+      "ingredients": [
+        {
+          "key": "shrimp",
+          "quantity": 0.15,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "winter_melon",
+          "quantity": 0.5,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "ginger",
+          "quantity": 0.01,
+          "unit": "kg",
+          "optional": true
+        },
+        {
+          "key": "scallion",
+          "quantity": 0.01,
+          "unit": "kg",
+          "optional": true
+        }
+      ],
+      "taste_tags": [
+        "清淡",
+        "海鲜"
+      ]
     }
   ]
 }
