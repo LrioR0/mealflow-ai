@@ -54,6 +54,11 @@ class User(TimestampMixin, Base):
     email: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(80))
+    # 家庭档案扩展:性别/常驻或访客/忌口(自由文本)/备注(特殊事件)
+    gender: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    residency: Mapped[str] = mapped_column(String(10), default="resident")
+    taboo: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
 
 class WorkspaceMember(TimestampMixin, Base):
@@ -71,8 +76,25 @@ class DietaryRestriction(TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    # 家庭模式:user_id 为空表示全家共享限制,否则为成员个人忌口/过敏
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     type: Mapped[str] = mapped_column(String(32))
     ingredient_key: Mapped[str] = mapped_column(String(80))
+
+
+class MemberEvent(TimestampMixin, Base):
+    """家庭成员的特殊事件(例假/感冒等),带生效日期,到期自动失效。"""
+
+    __tablename__ = "member_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(32))
+    constraint_tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
 class Site(TimestampMixin, Base):
@@ -104,6 +126,12 @@ class Ingredient(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(80))
     category: Mapped[str] = mapped_column(String(60))
     default_unit: Mapped[str] = mapped_column(String(20))
+    # 采购成本按市区大型超市参考价计算,金额输出必须携带来源标注
+    reference_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    price_source: Mapped[str] = mapped_column(
+        String(120), default="市区大型超市公开参考价"
+    )
+    price_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class InventoryItem(TimestampMixin, Base):
@@ -127,6 +155,8 @@ class Recipe(TimestampMixin, Base):
     kcal_per_serving: Mapped[int | None] = mapped_column(Integer, nullable=True)
     estimated_cost_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # 口味维度 tags(辛辣/油腻/生冷/清淡/海鲜/温补),与成员约束做冲突检测
+    taste_tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     allergens: Mapped[list[str]] = mapped_column(JSON, default=list)
     steps: Mapped[list[str]] = mapped_column(JSON, default=list)
     source_name: Mapped[str] = mapped_column(String(160), default="自制演示数据")
@@ -195,30 +225,27 @@ class MealPlan(TimestampMixin, Base):
     )
 
 
-class KioskDevice(TimestampMixin, Base):
-    __tablename__ = "kiosk_devices"
+class AgentChatSession(TimestampMixin, Base):
+    """对话式工作台的会话,多轮消息围绕一个会话展开。"""
+
+    __tablename__ = "agent_chat_sessions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    # 数据字典必填字段：device_id 标识物理终端，明文令牌只在注册时展示一次
-    device_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
-    site_id: Mapped[str] = mapped_column(ForeignKey("sites.id"), index=True)
-    token_hash: Mapped[str] = mapped_column(String(255))
-    status: Mapped[str] = mapped_column(String(32), default="active")
-    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    title: Mapped[str] = mapped_column(String(120), default="新会话")
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
-class Feedback(TimestampMixin, Base):
-    __tablename__ = "feedback"
+class AgentChatMessage(TimestampMixin, Base):
+    """会话消息。assistant 消息保存思维链回看与关联的运行/方案。"""
+
+    __tablename__ = "agent_chat_messages"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    device_id: Mapped[str] = mapped_column(ForeignKey("kiosk_devices.id"), index=True)
-    meal_service_id: Mapped[str] = mapped_column(ForeignKey("meal_services.id"), index=True)
-    meal_plan_id: Mapped[str] = mapped_column(ForeignKey("meal_plans.id"), index=True)
-    rating: Mapped[int] = mapped_column(Integer)
-    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
-    comment: Mapped[str | None] = mapped_column(String(300), nullable=True)
-    leftover_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    is_suspicious: Mapped[bool] = mapped_column(Boolean, default=False)
-    # api.md：反馈请求携带幂等键，同键重放不产生重复记录
-    idempotency_key: Mapped[str | None] = mapped_column(String(80), index=True, nullable=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("agent_chat_sessions.id"), index=True)
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)
+    thinking_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("agent_runs.id"), nullable=True)
+    plan_id: Mapped[str | None] = mapped_column(ForeignKey("meal_plans.id"), nullable=True)
+

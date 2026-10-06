@@ -3,6 +3,7 @@ export interface PlanningConstraints {
   budget_limit_cents: number | null
   dietary_style: string[]
   excluded_ingredients: string[]
+  preferred_dishes: string[]
   prioritize_expiring: boolean
   time_limit_minutes: number | null
 }
@@ -19,11 +20,12 @@ export interface ToolTrace {
 export interface MenuOption {
   strategy: string
   title: string
-  items: Array<{ name: string; servings: number; kcal_per_serving: number }>
+  items: Array<{ name: string; servings: number; kcal_per_serving: number; recipe_id?: string }>
   estimated_cost_cents: number
   estimated_kcal_per_serving?: number | null
   score_breakdown: Record<string, number>
   procurement_list: Array<Record<string, string>>
+  pantry_notes?: string[]
   reasons: string[]
   warnings: string[]
 }

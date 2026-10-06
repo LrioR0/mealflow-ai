@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import Any
 
 
@@ -22,3 +23,13 @@ class LLMProvider(ABC):
     @abstractmethod
     async def healthcheck(self) -> bool:
         raise NotImplementedError
+
+    def supports_stream(self) -> bool:
+        return False
+
+    def chat_stream(
+        self, *, messages: list[dict[str, Any]]
+    ) -> AsyncIterator[tuple[str, str]]:
+        """流式补全:yield (类型, 增量)。类型 thinking=思维链,text=正文。默认不支持。"""
+        raise NotImplementedError
+        yield "", ""  # pragma: no cover

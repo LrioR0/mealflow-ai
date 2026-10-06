@@ -3,285 +3,1173 @@
   "_usage_hint": "用餐限制预置：allergy 花生、dislike 香菜（均进硬过滤）。inventory 预置 2 天内到期的番茄用于演示临期优先。",
   "recipes": [
     {
-      "name": "番茄炒蛋", "servings": 4, "duration_minutes": 15,
-      "kcal_per_serving": 186, "estimated_cost_cents": 320,
-      "tags": ["家常", "快手", "下饭"], "allergens": ["蛋"],
-      "steps": ["番茄切块，鸡蛋打散加少许盐", "热油炒蛋至凝固盛出", "炒番茄出汁后倒回鸡蛋翻匀"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "番茄炒蛋",
+      "servings": 4,
+      "duration_minutes": 15,
+      "kcal_per_serving": 186,
+      "estimated_cost_cents": 320,
+      "tags": [
+        "家常",
+        "快手",
+        "下饭"
+      ],
+      "allergens": [
+        "蛋"
+      ],
+      "steps": [
+        "番茄切块，鸡蛋打散加少许盐",
+        "热油炒蛋至凝固盛出",
+        "炒番茄出汁后倒回鸡蛋翻匀"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
       "ingredients": [
-        {"key": "tomato", "quantity": 0.6, "unit": "kg", "optional": false},
-        {"key": "egg", "quantity": 6, "unit": "个", "optional": false},
-        {"key": "scallion", "quantity": 0.02, "unit": "kg", "optional": true},
-        {"key": "oil", "quantity": 0.05, "unit": "L", "optional": true}
+        {
+          "key": "tomato",
+          "quantity": 0.6,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "egg",
+          "quantity": 6,
+          "unit": "个",
+          "optional": false
+        },
+        {
+          "key": "scallion",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": true
+        },
+        {
+          "key": "oil",
+          "quantity": 0.05,
+          "unit": "L",
+          "optional": true
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "清炒时蔬",
+      "servings": 4,
+      "duration_minutes": 10,
+      "kcal_per_serving": 92,
+      "estimated_cost_cents": 150,
+      "tags": [
+        "清淡",
+        "快手",
+        "素食"
+      ],
+      "allergens": [],
+      "steps": [
+        "青菜洗净沥干",
+        "热油下蒜末爆香",
+        "下青菜大火翻炒调味出锅"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "greens",
+          "quantity": 0.5,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "garlic",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "oil",
+          "quantity": 0.04,
+          "unit": "L",
+          "optional": true
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "土豆烧鸡",
+      "servings": 4,
+      "duration_minutes": 45,
+      "kcal_per_serving": 328,
+      "estimated_cost_cents": 620,
+      "tags": [
+        "家常",
+        "炖菜"
+      ],
+      "allergens": [],
+      "steps": [
+        "鸡腿剁块焯水",
+        "煸炒鸡块加酱油上色",
+        "加土豆块和热水炖 30 分钟收汁"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "potato",
+          "quantity": 0.6,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "chicken_leg",
+          "quantity": 0.8,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "soy_sauce",
+          "quantity": 0.04,
+          "unit": "L",
+          "optional": true
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "青椒肉丝",
+      "servings": 4,
+      "duration_minutes": 20,
+      "kcal_per_serving": 295,
+      "estimated_cost_cents": 680,
+      "tags": [
+        "家常",
+        "下饭"
+      ],
+      "allergens": [],
+      "steps": [
+        "猪肉切丝上浆，青椒切丝",
+        "滑炒肉丝至变色盛出",
+        "炒青椒后合炒调味"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "pepper_green",
+          "quantity": 0.35,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "pork",
+          "quantity": 0.3,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "starch",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": true
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "醋溜土豆丝",
+      "servings": 4,
+      "duration_minutes": 15,
+      "kcal_per_serving": 158,
+      "estimated_cost_cents": 180,
+      "tags": [
+        "清淡",
+        "快手",
+        "素食"
+      ],
+      "allergens": [],
+      "steps": [
+        "土豆切细丝泡水去淀粉",
+        "大火快炒保持脆感",
+        "出锅前烹香醋"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "potato",
+          "quantity": 0.7,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "vinegar",
+          "quantity": 0.03,
+          "unit": "L",
+          "optional": true
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "香菇青菜",
+      "servings": 4,
+      "duration_minutes": 12,
+      "kcal_per_serving": 105,
+      "estimated_cost_cents": 240,
+      "tags": [
+        "清淡",
+        "素食"
+      ],
+      "allergens": [],
+      "steps": [
+        "香菇切片焯水",
+        "先炒香菇再下青菜",
+        "调味勾薄芡出锅"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "mushroom",
+          "quantity": 0.25,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "greens",
+          "quantity": 0.5,
+          "unit": "kg",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "红烧豆腐",
+      "servings": 4,
+      "duration_minutes": 20,
+      "kcal_per_serving": 210,
+      "estimated_cost_cents": 300,
+      "tags": [
+        "家常",
+        "素食"
+      ],
+      "allergens": [
+        "大豆"
+      ],
+      "steps": [
+        "豆腐切块煎至两面金黄",
+        "加酱油和热水烧 10 分钟",
+        "收汁撒葱花"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "tofu",
+          "quantity": 0.6,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "soy_sauce",
+          "quantity": 0.04,
+          "unit": "L",
+          "optional": true
+        }
+      ],
+      "taste_tags": [
+        "油腻"
       ]
     },
     {
-      "name": "清炒时蔬", "servings": 4, "duration_minutes": 10,
-      "kcal_per_serving": 92, "estimated_cost_cents": 150,
-      "tags": ["清淡", "快手", "素食"], "allergens": [],
-      "steps": ["青菜洗净沥干", "热油下蒜末爆香", "下青菜大火翻炒调味出锅"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "冬瓜肉丸汤",
+      "servings": 4,
+      "duration_minutes": 30,
+      "kcal_per_serving": 240,
+      "estimated_cost_cents": 380,
+      "tags": [
+        "汤羹"
+      ],
+      "allergens": [],
+      "steps": [
+        "猪肉糜调味摔打上劲",
+        "挤成丸子下温水定形",
+        "加冬瓜片煮至透明调味"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
       "ingredients": [
-        {"key": "greens", "quantity": 0.5, "unit": "kg", "optional": false},
-        {"key": "garlic", "quantity": 0.02, "unit": "kg", "optional": false},
-        {"key": "oil", "quantity": 0.04, "unit": "L", "optional": true}
+        {
+          "key": "pork",
+          "quantity": 0.25,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "winter_melon",
+          "quantity": 0.5,
+          "unit": "kg",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "番茄牛腩",
+      "servings": 4,
+      "duration_minutes": 120,
+      "kcal_per_serving": 350,
+      "estimated_cost_cents": 980,
+      "tags": [
+        "炖菜",
+        "硬菜"
+      ],
+      "allergens": [],
+      "steps": [
+        "牛腩切块焯水去血沫",
+        "炒番茄出沙加牛腩加热水",
+        "小火炖 100 分钟调味"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "tomato",
+          "quantity": 0.5,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "beef",
+          "quantity": 0.5,
+          "unit": "kg",
+          "optional": false
+        }
+      ],
+      "taste_tags": [
+        "油腻"
       ]
     },
     {
-      "name": "土豆烧鸡", "servings": 4, "duration_minutes": 45,
-      "kcal_per_serving": 328, "estimated_cost_cents": 620,
-      "tags": ["家常", "炖菜"], "allergens": [],
-      "steps": ["鸡腿剁块焯水", "煸炒鸡块加酱油上色", "加土豆块和热水炖 30 分钟收汁"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "黄瓜炒蛋",
+      "servings": 4,
+      "duration_minutes": 12,
+      "kcal_per_serving": 175,
+      "estimated_cost_cents": 280,
+      "tags": [
+        "快手",
+        "家常"
+      ],
+      "allergens": [
+        "蛋"
+      ],
+      "steps": [
+        "黄瓜切片，鸡蛋打散",
+        "先炒蛋后炒黄瓜",
+        "合炒调味出锅"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
       "ingredients": [
-        {"key": "potato", "quantity": 0.6, "unit": "kg", "optional": false},
-        {"key": "chicken_leg", "quantity": 0.8, "unit": "kg", "optional": false},
-        {"key": "soy_sauce", "quantity": 0.04, "unit": "L", "optional": true}
+        {
+          "key": "cucumber",
+          "quantity": 0.4,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "egg",
+          "quantity": 4,
+          "unit": "个",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "蒜蓉茄子",
+      "servings": 4,
+      "duration_minutes": 20,
+      "kcal_per_serving": 190,
+      "estimated_cost_cents": 320,
+      "tags": [
+        "素食",
+        "下饭"
+      ],
+      "allergens": [],
+      "steps": [
+        "茄子切条蒸 8 分钟",
+        "蒜末爆香加酱油调成汁",
+        "浇汁拌匀"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "eggplant",
+          "quantity": 0.6,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "garlic",
+          "quantity": 0.03,
+          "unit": "kg",
+          "optional": false
+        }
+      ],
+      "taste_tags": [
+        "油腻"
       ]
     },
     {
-      "name": "青椒肉丝", "servings": 4, "duration_minutes": 20,
-      "kcal_per_serving": 295, "estimated_cost_cents": 680,
-      "tags": ["家常", "下饭"], "allergens": [],
-      "steps": ["猪肉切丝上浆，青椒切丝", "滑炒肉丝至变色盛出", "炒青椒后合炒调味"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "麻婆豆腐",
+      "servings": 4,
+      "duration_minutes": 20,
+      "kcal_per_serving": 265,
+      "estimated_cost_cents": 350,
+      "tags": [
+        "微辣",
+        "下饭"
+      ],
+      "allergens": [
+        "大豆"
+      ],
+      "steps": [
+        "豆腐块盐水焯定型",
+        "豆瓣酱炒出红油加肉末",
+        "下豆腐烧 8 分钟勾芡"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
       "ingredients": [
-        {"key": "pepper_green", "quantity": 0.35, "unit": "kg", "optional": false},
-        {"key": "pork", "quantity": 0.3, "unit": "kg", "optional": false},
-        {"key": "starch", "quantity": 0.02, "unit": "kg", "optional": true}
+        {
+          "key": "tofu",
+          "quantity": 0.6,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "pork",
+          "quantity": 0.12,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "doubanjiang",
+          "quantity": 0.03,
+          "unit": "kg",
+          "optional": true
+        }
+      ],
+      "taste_tags": [
+        "辛辣",
+        "油腻"
       ]
     },
     {
-      "name": "醋溜土豆丝", "servings": 4, "duration_minutes": 15,
-      "kcal_per_serving": 158, "estimated_cost_cents": 180,
-      "tags": ["清淡", "快手", "素食"], "allergens": [],
-      "steps": ["土豆切细丝泡水去淀粉", "大火快炒保持脆感", "出锅前烹香醋"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "清蒸草鱼",
+      "servings": 4,
+      "duration_minutes": 25,
+      "kcal_per_serving": 220,
+      "estimated_cost_cents": 850,
+      "tags": [
+        "低脂",
+        "硬菜"
+      ],
+      "allergens": [
+        "鱼"
+      ],
+      "steps": [
+        "草鱼两面打花刀腌 10 分钟",
+        "水开后蒸 10 分钟",
+        "铺葱丝淋热油和蒸鱼酱油"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
       "ingredients": [
-        {"key": "potato", "quantity": 0.7, "unit": "kg", "optional": false},
-        {"key": "vinegar", "quantity": 0.03, "unit": "L", "optional": true}
+        {
+          "key": "fish",
+          "quantity": 0.8,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "scallion",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "ginger",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": true
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "虾仁炒蛋",
+      "servings": 4,
+      "duration_minutes": 15,
+      "kcal_per_serving": 230,
+      "estimated_cost_cents": 900,
+      "tags": [
+        "低脂",
+        "快手"
+      ],
+      "allergens": [
+        "虾",
+        "蛋"
+      ],
+      "steps": [
+        "虾仁焯水 10 秒捞出",
+        "蛋液调味炒半凝固",
+        "下虾仁翻匀出锅"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "shrimp",
+          "quantity": 0.3,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "egg",
+          "quantity": 4,
+          "unit": "个",
+          "optional": false
+        }
+      ],
+      "taste_tags": [
+        "海鲜"
       ]
     },
     {
-      "name": "香菇青菜", "servings": 4, "duration_minutes": 12,
-      "kcal_per_serving": 105, "estimated_cost_cents": 240,
-      "tags": ["清淡", "素食"], "allergens": [],
-      "steps": ["香菇切片焯水", "先炒香菇再下青菜", "调味勾薄芡出锅"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "宫保鸡丁",
+      "servings": 4,
+      "duration_minutes": 20,
+      "kcal_per_serving": 320,
+      "estimated_cost_cents": 620,
+      "tags": [
+        "微辣",
+        "下饭"
+      ],
+      "allergens": [
+        "花生"
+      ],
+      "steps": [
+        "鸡胸肉切丁上浆",
+        "爆炒鸡丁加豆瓣酱",
+        "加花生米翻匀出锅"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
       "ingredients": [
-        {"key": "mushroom", "quantity": 0.25, "unit": "kg", "optional": false},
-        {"key": "greens", "quantity": 0.5, "unit": "kg", "optional": false}
+        {
+          "key": "chicken_breast",
+          "quantity": 0.5,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "peanut",
+          "quantity": 0.08,
+          "unit": "kg",
+          "optional": false
+        }
+      ],
+      "taste_tags": [
+        "辛辣"
       ]
     },
     {
-      "name": "红烧豆腐", "servings": 4, "duration_minutes": 20,
-      "kcal_per_serving": 210, "estimated_cost_cents": 300,
-      "tags": ["家常", "素食"], "allergens": ["大豆"],
-      "steps": ["豆腐切块煎至两面金黄", "加酱油和热水烧 10 分钟", "收汁撒葱花"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "香菜拌牛肉",
+      "servings": 4,
+      "duration_minutes": 40,
+      "kcal_per_serving": 280,
+      "estimated_cost_cents": 1150,
+      "tags": [
+        "凉菜",
+        "硬菜"
+      ],
+      "allergens": [],
+      "steps": [
+        "牛腱子卤 40 分钟晾凉",
+        "切薄片",
+        "加香菜、蒜末、酱油拌匀"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
       "ingredients": [
-        {"key": "tofu", "quantity": 0.6, "unit": "kg", "optional": false},
-        {"key": "soy_sauce", "quantity": 0.04, "unit": "L", "optional": true}
+        {
+          "key": "beef",
+          "quantity": 0.4,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "cilantro",
+          "quantity": 0.05,
+          "unit": "kg",
+          "optional": false
+        }
+      ],
+      "taste_tags": [
+        "生冷"
       ]
     },
     {
-      "name": "冬瓜肉丸汤", "servings": 4, "duration_minutes": 30,
-      "kcal_per_serving": 240, "estimated_cost_cents": 380,
-      "tags": ["汤羹"], "allergens": [],
-      "steps": ["猪肉糜调味摔打上劲", "挤成丸子下温水定形", "加冬瓜片煮至透明调味"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "紫菜蛋花汤",
+      "servings": 4,
+      "duration_minutes": 10,
+      "kcal_per_serving": 60,
+      "estimated_cost_cents": 100,
+      "tags": [
+        "汤羹",
+        "清淡"
+      ],
+      "allergens": [
+        "蛋"
+      ],
+      "steps": [
+        "水烧开下紫菜",
+        "淋入蛋液成蛋花",
+        "加盐和香油调味"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
       "ingredients": [
-        {"key": "pork", "quantity": 0.25, "unit": "kg", "optional": false},
-        {"key": "winter_melon", "quantity": 0.5, "unit": "kg", "optional": false}
+        {
+          "key": "seaweed",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "egg",
+          "quantity": 2,
+          "unit": "个",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "大锅米饭",
+      "servings": 4,
+      "duration_minutes": 30,
+      "kcal_per_serving": 130,
+      "estimated_cost_cents": 70,
+      "tags": [
+        "主食"
+      ],
+      "allergens": [],
+      "steps": [
+        "大米淘洗两遍",
+        "按 1:1.3 加水上蒸箱",
+        "上汽后蒸 25 分钟"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "rice",
+          "quantity": 0.55,
+          "unit": "kg",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "家常汤面",
+      "servings": 4,
+      "duration_minutes": 15,
+      "kcal_per_serving": 320,
+      "estimated_cost_cents": 240,
+      "tags": [
+        "主食",
+        "快手"
+      ],
+      "allergens": [
+        "蛋",
+        "麸质"
+      ],
+      "steps": [
+        "水开下面煮 5 分钟",
+        "青菜烫熟",
+        "装碗加煎蛋浇汤"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "noodles",
+          "quantity": 0.4,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "greens",
+          "quantity": 0.15,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "egg",
+          "quantity": 2,
+          "unit": "个",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "豆角焖面",
+      "servings": 4,
+      "duration_minutes": 25,
+      "kcal_per_serving": 510,
+      "estimated_cost_cents": 420,
+      "tags": [
+        "主食",
+        "面食",
+        "家常"
+      ],
+      "allergens": [
+        "麸质"
+      ],
+      "steps": [
+        "豆角切段，猪肉切片",
+        "肉片和豆角炒香后加酱油及适量热水",
+        "铺入面条加盖焖熟，拌匀收汁"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-05",
+      "ingredients": [
+        {
+          "key": "noodles",
+          "quantity": 0.45,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "green_beans",
+          "quantity": 0.35,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "pork",
+          "quantity": 0.2,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "soy_sauce",
+          "quantity": 0.03,
+          "unit": "L",
+          "optional": false
+        },
+        {
+          "key": "oil",
+          "quantity": 0.03,
+          "unit": "L",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "胡萝卜炒肉",
+      "servings": 4,
+      "duration_minutes": 18,
+      "kcal_per_serving": 260,
+      "estimated_cost_cents": 540,
+      "tags": [
+        "家常"
+      ],
+      "allergens": [],
+      "steps": [
+        "猪肉切片上浆，胡萝卜切片",
+        "先炒肉片盛出",
+        "炒胡萝卜后合炒调味"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "carrot",
+          "quantity": 0.3,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "pork",
+          "quantity": 0.25,
+          "unit": "kg",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "洋葱炒蛋",
+      "servings": 4,
+      "duration_minutes": 12,
+      "kcal_per_serving": 185,
+      "estimated_cost_cents": 260,
+      "tags": [
+        "快手"
+      ],
+      "allergens": [
+        "蛋"
+      ],
+      "steps": [
+        "洋葱切丝，鸡蛋打散",
+        "炒蛋至半熟盛出",
+        "炒洋葱软化后合炒"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "onion",
+          "quantity": 0.3,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "egg",
+          "quantity": 4,
+          "unit": "个",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
+    },
+    {
+      "name": "拍黄瓜",
+      "servings": 4,
+      "duration_minutes": 8,
+      "kcal_per_serving": 45,
+      "estimated_cost_cents": 90,
+      "tags": [
+        "凉菜",
+        "清淡",
+        "快手",
+        "素食"
+      ],
+      "allergens": [],
+      "steps": [
+        "黄瓜拍裂切段",
+        "加盐腌 5 分钟沥水",
+        "加蒜末香醋拌匀"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
+      "ingredients": [
+        {
+          "key": "cucumber",
+          "quantity": 0.5,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "garlic",
+          "quantity": 0.02,
+          "unit": "kg",
+          "optional": false
+        }
+      ],
+      "taste_tags": [
+        "生冷"
       ]
     },
     {
-      "name": "番茄牛腩", "servings": 4, "duration_minutes": 120,
-      "kcal_per_serving": 350, "estimated_cost_cents": 980,
-      "tags": ["炖菜", "硬菜"], "allergens": [],
-      "steps": ["牛腩切块焯水去血沫", "炒番茄出沙加牛腩加热水", "小火炖 100 分钟调味"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "清汤冬瓜",
+      "servings": 4,
+      "duration_minutes": 12,
+      "kcal_per_serving": 30,
+      "estimated_cost_cents": 60,
+      "tags": [
+        "汤羹",
+        "清淡",
+        "素食"
+      ],
+      "allergens": [],
+      "steps": [
+        "冬瓜去皮切厚片",
+        "水开下冬瓜煮至透明",
+        "加盐撒葱花"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
       "ingredients": [
-        {"key": "tomato", "quantity": 0.5, "unit": "kg", "optional": false},
-        {"key": "beef", "quantity": 0.5, "unit": "kg", "optional": false}
-      ]
+        {
+          "key": "winter_melon",
+          "quantity": 0.6,
+          "unit": "kg",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
     },
     {
-      "name": "黄瓜炒蛋", "servings": 4, "duration_minutes": 12,
-      "kcal_per_serving": 175, "estimated_cost_cents": 280,
-      "tags": ["快手", "家常"], "allergens": ["蛋"],
-      "steps": ["黄瓜切片，鸡蛋打散", "先炒蛋后炒黄瓜", "合炒调味出锅"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "青椒土豆片",
+      "servings": 4,
+      "duration_minutes": 15,
+      "kcal_per_serving": 170,
+      "estimated_cost_cents": 220,
+      "tags": [
+        "素食",
+        "家常"
+      ],
+      "allergens": [],
+      "steps": [
+        "土豆切片泡水，青椒切块",
+        "先煎土豆片至边缘微黄",
+        "下青椒炒熟调味"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
       "ingredients": [
-        {"key": "cucumber", "quantity": 0.4, "unit": "kg", "optional": false},
-        {"key": "egg", "quantity": 4, "unit": "个", "optional": false}
-      ]
+        {
+          "key": "pepper_green",
+          "quantity": 0.2,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "potato",
+          "quantity": 0.6,
+          "unit": "kg",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
     },
     {
-      "name": "蒜蓉茄子", "servings": 4, "duration_minutes": 20,
-      "kcal_per_serving": 190, "estimated_cost_cents": 320,
-      "tags": ["素食", "下饭"], "allergens": [],
-      "steps": ["茄子切条蒸 8 分钟", "蒜末爆香加酱油调成汁", "浇汁拌匀"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "牛奶馒头",
+      "servings": 4,
+      "duration_minutes": 40,
+      "kcal_per_serving": 220,
+      "estimated_cost_cents": 90,
+      "tags": [
+        "主食",
+        "面点"
+      ],
+      "allergens": [
+        "麸质"
+      ],
+      "steps": [
+        "面粉加牛奶和酵母揉成团",
+        "发酵至两倍大",
+        "整形后蒸 15 分钟"
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发",
+      "created_at": "2026-10-03",
       "ingredients": [
-        {"key": "eggplant", "quantity": 0.6, "unit": "kg", "optional": false},
-        {"key": "garlic", "quantity": 0.03, "unit": "kg", "optional": false}
-      ]
+        {
+          "key": "flour",
+          "quantity": 0.4,
+          "unit": "kg",
+          "optional": false
+        },
+        {
+          "key": "milk",
+          "quantity": 0.2,
+          "unit": "L",
+          "optional": false
+        }
+      ],
+      "taste_tags": []
     },
     {
-      "name": "麻婆豆腐", "servings": 4, "duration_minutes": 20,
-      "kcal_per_serving": 265, "estimated_cost_cents": 350,
-      "tags": ["微辣", "下饭"], "allergens": ["大豆"],
-      "steps": ["豆腐块盐水焯定型", "豆瓣酱炒出红油加肉末", "下豆腐烧 8 分钟勾芡"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "辣子鸡",
+      "servings": 2,
+      "duration_minutes": 40,
+      "kcal_per_serving": 520,
+      "estimated_cost_cents": 3250,
+      "tags": [
+        "川菜",
+        "下饭"
+      ],
+      "taste_tags": [
+        "辛辣",
+        "油腻"
+      ],
+      "allergens": [
+        "花生"
+      ],
+      "steps": [
+        "鸡腿肉切丁，加酱油、淀粉码味15分钟",
+        "热油把鸡丁煸干水汽至金黄捞出",
+        "底油下干辣椒、花椒、姜蒜爆香",
+        "倒回鸡丁大火翻炒，加花生米、葱段翻匀"
+      ],
       "ingredients": [
-        {"key": "tofu", "quantity": 0.6, "unit": "kg", "optional": false},
-        {"key": "pork", "quantity": 0.12, "unit": "kg", "optional": false},
-        {"key": "doubanjiang", "quantity": 0.03, "unit": "kg", "optional": true}
-      ]
+        {
+          "key": "chicken_leg",
+          "quantity": 0.4,
+          "unit": "kg"
+        },
+        {
+          "key": "dried_chili",
+          "quantity": 0.05,
+          "unit": "kg"
+        },
+        {
+          "key": "peanut",
+          "quantity": 0.05,
+          "unit": "kg"
+        },
+        {
+          "key": "ginger",
+          "quantity": 0.03,
+          "unit": "kg"
+        },
+        {
+          "key": "garlic",
+          "quantity": 0.03,
+          "unit": "kg"
+        },
+        {
+          "key": "scallion",
+          "quantity": 0.05,
+          "unit": "kg"
+        },
+        {
+          "key": "soy_sauce",
+          "quantity": 0.02,
+          "unit": "L"
+        },
+        {
+          "key": "starch",
+          "quantity": 0.02,
+          "unit": "kg"
+        }
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发"
     },
     {
-      "name": "清蒸草鱼", "servings": 4, "duration_minutes": 25,
-      "kcal_per_serving": 220, "estimated_cost_cents": 850,
-      "tags": ["低脂", "硬菜"], "allergens": ["鱼"],
-      "steps": ["草鱼两面打花刀腌 10 分钟", "水开后蒸 10 分钟", "铺葱丝淋热油和蒸鱼酱油"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
+      "name": "黄焖鸡米饭",
+      "servings": 2,
+      "duration_minutes": 35,
+      "kcal_per_serving": 480,
+      "estimated_cost_cents": 2800,
+      "tags": [
+        "家常",
+        "下饭"
+      ],
+      "taste_tags": [],
+      "allergens": [],
+      "steps": [
+        "鸡腿肉切块，加酱油、淀粉码味",
+        "砂锅下姜蒜爆香，下鸡块翻炒",
+        "加土豆块和热水焖15分钟",
+        "收汁前下青椒块，配米饭食用"
+      ],
       "ingredients": [
-        {"key": "fish", "quantity": 0.8, "unit": "kg", "optional": false},
-        {"key": "scallion", "quantity": 0.02, "unit": "kg", "optional": false},
-        {"key": "ginger", "quantity": 0.02, "unit": "kg", "optional": true}
-      ]
-    },
-    {
-      "name": "虾仁炒蛋", "servings": 4, "duration_minutes": 15,
-      "kcal_per_serving": 230, "estimated_cost_cents": 900,
-      "tags": ["低脂", "快手"], "allergens": ["虾", "蛋"],
-      "steps": ["虾仁焯水 10 秒捞出", "蛋液调味炒半凝固", "下虾仁翻匀出锅"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "shrimp", "quantity": 0.3, "unit": "kg", "optional": false},
-        {"key": "egg", "quantity": 4, "unit": "个", "optional": false}
-      ]
-    },
-    {
-      "name": "宫保鸡丁", "servings": 4, "duration_minutes": 20,
-      "kcal_per_serving": 320, "estimated_cost_cents": 620,
-      "tags": ["微辣", "下饭"], "allergens": ["花生"],
-      "steps": ["鸡胸肉切丁上浆", "爆炒鸡丁加豆瓣酱", "加花生米翻匀出锅"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "chicken_breast", "quantity": 0.5, "unit": "kg", "optional": false},
-        {"key": "peanut", "quantity": 0.08, "unit": "kg", "optional": false}
-      ]
-    },
-    {
-      "name": "香菜拌牛肉", "servings": 4, "duration_minutes": 40,
-      "kcal_per_serving": 280, "estimated_cost_cents": 1150,
-      "tags": ["凉菜", "硬菜"], "allergens": [],
-      "steps": ["牛腱子卤 40 分钟晾凉", "切薄片", "加香菜、蒜末、酱油拌匀"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "beef", "quantity": 0.4, "unit": "kg", "optional": false},
-        {"key": "cilantro", "quantity": 0.05, "unit": "kg", "optional": false}
-      ]
-    },
-    {
-      "name": "紫菜蛋花汤", "servings": 4, "duration_minutes": 10,
-      "kcal_per_serving": 60, "estimated_cost_cents": 100,
-      "tags": ["汤羹", "清淡"], "allergens": ["蛋"],
-      "steps": ["水烧开下紫菜", "淋入蛋液成蛋花", "加盐和香油调味"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "seaweed", "quantity": 0.02, "unit": "kg", "optional": false},
-        {"key": "egg", "quantity": 2, "unit": "个", "optional": false}
-      ]
-    },
-    {
-      "name": "大锅米饭", "servings": 4, "duration_minutes": 30,
-      "kcal_per_serving": 130, "estimated_cost_cents": 70,
-      "tags": ["主食"], "allergens": [],
-      "steps": ["大米淘洗两遍", "按 1:1.3 加水上蒸箱", "上汽后蒸 25 分钟"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "rice", "quantity": 0.55, "unit": "kg", "optional": false}
-      ]
-    },
-    {
-      "name": "家常汤面", "servings": 4, "duration_minutes": 15,
-      "kcal_per_serving": 320, "estimated_cost_cents": 240,
-      "tags": ["主食", "快手"], "allergens": ["蛋", "麸质"],
-      "steps": ["水开下面煮 5 分钟", "青菜烫熟", "装碗加煎蛋浇汤"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "noodles", "quantity": 0.4, "unit": "kg", "optional": false},
-        {"key": "greens", "quantity": 0.15, "unit": "kg", "optional": false},
-        {"key": "egg", "quantity": 2, "unit": "个", "optional": false}
-      ]
-    },
-    {
-      "name": "胡萝卜炒肉", "servings": 4, "duration_minutes": 18,
-      "kcal_per_serving": 260, "estimated_cost_cents": 540,
-      "tags": ["家常"], "allergens": [],
-      "steps": ["猪肉切片上浆，胡萝卜切片", "先炒肉片盛出", "炒胡萝卜后合炒调味"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "carrot", "quantity": 0.3, "unit": "kg", "optional": false},
-        {"key": "pork", "quantity": 0.25, "unit": "kg", "optional": false}
-      ]
-    },
-    {
-      "name": "洋葱炒蛋", "servings": 4, "duration_minutes": 12,
-      "kcal_per_serving": 185, "estimated_cost_cents": 260,
-      "tags": ["快手"], "allergens": ["蛋"],
-      "steps": ["洋葱切丝，鸡蛋打散", "炒蛋至半熟盛出", "炒洋葱软化后合炒"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "onion", "quantity": 0.3, "unit": "kg", "optional": false},
-        {"key": "egg", "quantity": 4, "unit": "个", "optional": false}
-      ]
-    },
-    {
-      "name": "拍黄瓜", "servings": 4, "duration_minutes": 8,
-      "kcal_per_serving": 45, "estimated_cost_cents": 90,
-      "tags": ["凉菜", "清淡", "快手", "素食"], "allergens": [],
-      "steps": ["黄瓜拍裂切段", "加盐腌 5 分钟沥水", "加蒜末香醋拌匀"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "cucumber", "quantity": 0.5, "unit": "kg", "optional": false},
-        {"key": "garlic", "quantity": 0.02, "unit": "kg", "optional": false}
-      ]
-    },
-    {
-      "name": "清汤冬瓜", "servings": 4, "duration_minutes": 12,
-      "kcal_per_serving": 30, "estimated_cost_cents": 60,
-      "tags": ["汤羹", "清淡", "素食"], "allergens": [],
-      "steps": ["冬瓜去皮切厚片", "水开下冬瓜煮至透明", "加盐撒葱花"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "winter_melon", "quantity": 0.6, "unit": "kg", "optional": false}
-      ]
-    },
-    {
-      "name": "青椒土豆片", "servings": 4, "duration_minutes": 15,
-      "kcal_per_serving": 170, "estimated_cost_cents": 220,
-      "tags": ["素食", "家常"], "allergens": [],
-      "steps": ["土豆切片泡水，青椒切块", "先煎土豆片至边缘微黄", "下青椒炒熟调味"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "pepper_green", "quantity": 0.2, "unit": "kg", "optional": false},
-        {"key": "potato", "quantity": 0.6, "unit": "kg", "optional": false}
-      ]
-    },
-    {
-      "name": "牛奶馒头", "servings": 4, "duration_minutes": 40,
-      "kcal_per_serving": 220, "estimated_cost_cents": 90,
-      "tags": ["主食", "面点"], "allergens": ["麸质"],
-      "steps": ["面粉加牛奶和酵母揉成团", "发酵至两倍大", "整形后蒸 15 分钟"],
-      "source_name": "MealFlow 演示数据组（自制）", "source_url": "", "license_note": "自制演示数据，仅用于演示，可再分发", "created_at": "2026-10-03",
-      "ingredients": [
-        {"key": "flour", "quantity": 0.4, "unit": "kg", "optional": false},
-        {"key": "milk", "quantity": 0.2, "unit": "L", "optional": false}
-      ]
+        {
+          "key": "chicken_leg",
+          "quantity": 0.4,
+          "unit": "kg"
+        },
+        {
+          "key": "potato",
+          "quantity": 0.3,
+          "unit": "kg"
+        },
+        {
+          "key": "pepper_green",
+          "quantity": 0.1,
+          "unit": "kg"
+        },
+        {
+          "key": "ginger",
+          "quantity": 0.02,
+          "unit": "kg"
+        },
+        {
+          "key": "garlic",
+          "quantity": 0.02,
+          "unit": "kg"
+        },
+        {
+          "key": "soy_sauce",
+          "quantity": 0.02,
+          "unit": "L"
+        },
+        {
+          "key": "starch",
+          "quantity": 0.02,
+          "unit": "kg"
+        },
+        {
+          "key": "rice",
+          "quantity": 0.2,
+          "unit": "kg"
+        }
+      ],
+      "source_name": "MealFlow 演示数据组（自制）",
+      "source_url": "",
+      "license_note": "自制演示数据，仅用于演示，可再分发"
     }
   ]
 }

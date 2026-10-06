@@ -13,6 +13,13 @@ dependencies = [
   "uvicorn[standard]>=0.34,<1",
 ]
 
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [project.optional-dependencies]
 dev = [
   "httpx>=0.28,<1",
@@ -22,6 +29,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
 pythonpath = ["."]
 testpaths = ["tests"]
 

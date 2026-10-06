@@ -12,5 +12,12 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
     const message = await response.text()
     throw new Error(message || `Request failed: ${response.status}`)
   }
-  return response.json() as Promise<T>
+  if (response.status === 204) {
+    return undefined as T
+  }
+  const responseText = await response.text()
+  if (!responseText) {
+    return undefined as T
+  }
+  return JSON.parse(responseText) as T
 }

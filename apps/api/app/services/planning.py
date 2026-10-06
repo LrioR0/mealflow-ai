@@ -18,6 +18,20 @@ FEEDBACK_NEUTRAL = 0.5
 # 样本量达到该值后反馈分量不再向中性值收缩（评分终端设计：低样本只作提示）
 FEEDBACK_FULL_CONFIDENCE_SAMPLE = 5
 
+# 厨房常备料不作为冰箱库存或采购缺口,但仍参与过敏原/忌口判断。
+PANTRY_STAPLE_KEYS = {
+    "scallion",
+    "ginger",
+    "garlic",
+    "dried_chili",
+    "doubanjiang",
+    "soy_sauce",
+    "vinegar",
+    "starch",
+    "oil",
+    "salt",
+}
+
 
 @dataclass(frozen=True)
 class StrategyWeights:
@@ -33,8 +47,9 @@ class StrategyWeights:
 # 三方案共用文档基线权重，仅按软目标重新分配（合计恒为 1）
 STRATEGIES: tuple[StrategyWeights, ...] = (
     StrategyWeights("expiring_first", "临期优先", 0.60, 0.15, 0.10, 0.10, 0.05),
-    StrategyWeights("cost_first", "成本优先", 0.15, 0.15, 0.10, 0.55, 0.05),
-    StrategyWeights("satisfaction_first", "满意度优先", 0.15, 0.55, 0.10, 0.10, 0.10),
+    StrategyWeights("original_first", "原方案优先", 0.25, 0.25, 0.20, 0.25, 0.05),
+    StrategyWeights("balanced_first", "综合评估优先", 0.25, 0.25, 0.20, 0.25, 0.05),
+    StrategyWeights("dislike_first", "忌口优先", 0.20, 0.40, 0.20, 0.15, 0.05),
 )
 
 
@@ -60,20 +75,21 @@ def hard_filter(
     key_names: dict[str, str],
     restriction_types: dict[str, str] | None = None,
 ) -> tuple[list[RecipeContext], list[tuple[str, str]]]:
-    """返回 (保留菜谱, [(被过滤菜谱名, 原因)])。过敏原与忌口均为硬约束，来源是食堂档案。"""
+    """只把过敏原作为硬约束;普通忌口保留菜谱但由方案警告和忌口优先策略处理。"""
     types = restriction_types or {}
+    allergy_keys = {key for key in excluded_keys if types.get(key) == "allergy"}
     kept: list[RecipeContext] = []
     filtered: list[tuple[str, str]] = []
     for recipe in recipes:
-        hit_keys = recipe.required_ingredient_keys & set(excluded_keys)
+        hit_keys = recipe.required_ingredient_keys & allergy_keys
         if hit_keys:
             detail = "、".join(
                 f"{_restriction_label(key, types)}：{key_names.get(key, key)}"
                 for key in sorted(hit_keys)
             )
-            filtered.append((recipe.name, f"命中食堂档案限制（{detail}）"))
+            filtered.append((recipe.name, f"命中家庭档案限制（{detail}）"))
             continue
-        excluded_names = [key_names[key] for key in excluded_keys if key in key_names]
+        excluded_names = [key_names[key] for key in allergy_keys if key in key_names]
         if violates_allergen(recipe.allergens, excluded_names):
             hit_names = "、".join(
                 name for name in excluded_names if name in recipe.allergens
@@ -158,13 +174,53 @@ def weighted_score(weights: StrategyWeights, breakdown: dict[str, float]) -> flo
     )
 
 
-def choose_top(
-    scored: list[tuple[RecipeContext, dict[str, float]]], weights: StrategyWeights
-) -> list[RecipeContext]:
-    ordered = sorted(
-        scored, key=lambda item: (-weighted_score(weights, item[1]), item[0].name)
+def _normalize_dish_name(value: str) -> str:
+    return value.strip().replace("面条", "面").replace(" ", "")
+
+
+def _matches_preferred_dish(recipe: RecipeContext, preferred_dishes: list[str]) -> bool:
+    recipe_name = _normalize_dish_name(recipe.name)
+    return any(
+        (requested := _normalize_dish_name(value))
+        and (requested in recipe_name or recipe_name in requested)
+        for value in preferred_dishes
     )
-    return [recipe for recipe, _ in ordered[:DISHES_PER_OPTION]]
+
+
+def choose_top(
+    scored: list[tuple[RecipeContext, dict[str, float]]],
+    weights: StrategyWeights,
+    context: PlanningContext,
+    preferred_dishes: list[str] | None = None,
+) -> list[RecipeContext]:
+    if weights.key == "original_first":
+        # 原方案优先:保留菜谱库经过硬约束过滤后的原始顺序,
+        # 不让临期、成本或历史反馈重新打乱标准菜谱顺序。
+        ordered = list(scored)
+    elif weights.key == "dislike_first":
+        dislike_keys = {
+            constraint.ingredient_key
+            for constraint in context.member_constraints
+            if constraint.kind == "restriction"
+            and constraint.level == "warn"
+            and constraint.ingredient_key
+        }
+        ordered = sorted(
+            scored,
+            key=lambda item: (
+                len(item[0].required_ingredient_keys & dislike_keys),
+                -weighted_score(weights, item[1]),
+                item[0].name,
+            ),
+        )
+    else:
+        ordered = sorted(
+            scored, key=lambda item: (-weighted_score(weights, item[1]), item[0].name)
+        )
+    preferences = preferred_dishes or []
+    preferred = [recipe for recipe, _ in ordered if _matches_preferred_dish(recipe, preferences)]
+    remaining = [recipe for recipe, _ in ordered if recipe not in preferred]
+    return (preferred + remaining)[:DISHES_PER_OPTION]
 
 
 def compute_requirements(chosen: list[RecipeContext], diners: int) -> dict[str, Decimal]:
@@ -184,6 +240,8 @@ def procurement_lines(
 ) -> list[dict]:
     lines: list[dict] = []
     for key in sorted(requirements):
+        if key in PANTRY_STAPLE_KEYS:
+            continue
         required = requirements[key]
         available = context.available_for(key)
         gap = procurement_gap(required, available)
@@ -221,10 +279,23 @@ def build_option(
     key_names: dict[str, str],
 ) -> MenuOption:
     diners = constraints.expected_diners or context.expected_diners
-    chosen = choose_top(scored, weights)
+    chosen = choose_top(scored, weights, context, constraints.preferred_dishes)
 
     requirements = compute_requirements(chosen, diners)
     procurement = procurement_lines(requirements, context, key_names)
+    pantry_names = sorted(
+        {
+            key_names[line.key]
+            for recipe in chosen
+            for line in recipe.ingredients
+            if line.key in PANTRY_STAPLE_KEYS and line.key in key_names
+        }
+    )
+    pantry_notes = (
+        [f"本方案还会用到：{'、'.join(pantry_names)}。请确认厨房常备料是否齐全。"]
+        if pantry_names
+        else []
+    )
     total_cost_cents, total_kcal = estimate_totals(chosen, diners)
 
     breakdown = {
@@ -243,18 +314,27 @@ def build_option(
     )
     if expiring_used:
         reasons.append(f"优先利用临期食材（{'、'.join(expiring_used)}）")
+    matched_preferences = [
+        recipe.name
+        for recipe in chosen
+        if _matches_preferred_dish(recipe, constraints.preferred_dishes)
+    ]
+    if matched_preferences:
+        reasons.append(f"响应点名菜品（{'、'.join(matched_preferences)}）")
     for style in constraints.dietary_style:
         if any(style in recipe.tags for recipe in chosen):
             reasons.append(f"命中“{style}”偏好")
     if filtered_out:
         reasons.append(
-            "已按食堂档案的用餐限制排除（非本次输入）："
+            "已按家庭档案的用餐限制排除（非本次输入）："
             + "；".join(f"{name}（{reason}）" for name, reason in filtered_out[:3])
         )
-    if weights.key == "cost_first":
-        reasons.append("按成本分量加权选择低价组合")
-    if weights.key == "satisfaction_first":
-        reasons.append("按口味偏好与历史反馈加权")
+    if weights.key == "original_first":
+        reasons.append("按菜谱原版做法与标准配比推荐")
+    if weights.key == "balanced_first":
+        reasons.append("综合评估临期、口味、时间、预算与历史反馈")
+    if weights.key == "dislike_first":
+        reasons.append("优先避开家庭成员的长期忌口，过敏原始终为红线")
 
     # 反馈回流（评分终端设计 §5）：只影响软评分并给出可解释提示，不突破硬约束
     penalized: list[str] = []
@@ -265,7 +345,9 @@ def build_option(
             continue
         if stats.avg_rating < 3.5:
             reason_tags = "、".join(stats.top_tags) or "整体"
-            penalized.append(f"{recipe.name}（上次 {stats.avg_rating:.1f} 分，{reason_tags}反馈较多）")
+            penalized.append(
+                f"{recipe.name}（上次 {stats.avg_rating:.1f} 分，{reason_tags}反馈较多）"
+            )
         elif stats.avg_rating >= 4.5:
             favored.append(f"{recipe.name}（上次 {stats.avg_rating:.1f} 分）")
     if penalized:
@@ -274,10 +356,16 @@ def build_option(
         reasons.append("反馈回流：上次评分较高，满意度加权保留——" + "、".join(favored))
 
     warnings: list[str] = []
+    if constraints.preferred_dishes and not matched_preferences:
+        warnings.append(
+            "点名菜品未在可用菜谱中命中，或因家庭饮食限制被排除："
+            + "、".join(constraints.preferred_dishes)
+        )
     budget_cents = constraints.budget_limit_cents
     if budget_cents and total_cost_cents > budget_cents:
         warnings.append(
-            f"预计成本 {total_cost_cents / 100:.0f} 元超过预算 {budget_cents / 100:.0f} 元，需调整方案"
+            f"预计成本 {total_cost_cents / 100:.0f} 元超过预算 "
+            f"{budget_cents / 100:.0f} 元，需调整方案"
         )
 
     return MenuOption(
@@ -302,6 +390,7 @@ def build_option(
             ),
         },
         procurement_list=procurement,
+        pantry_notes=pantry_notes,
         reasons=reasons,
         warnings=warnings,
     )

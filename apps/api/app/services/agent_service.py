@@ -33,6 +33,9 @@ from app.services.context_loader import (
 def _extract_constraints(text: str, context: PlanningContext) -> PlanningConstraints:
     diner_match = re.search(r"(\d+)\s*人", text)
     budget_match = re.search(r"预算\s*(\d+)\s*元", text)
+    preferred_dishes = [recipe.name for recipe in context.recipes if recipe.name in text]
+    if "焖面" in text and not any("焖面" in name for name in preferred_dishes):
+        preferred_dishes.append("豆角焖面")
     return PlanningConstraints(
         expected_diners=int(diner_match.group(1)) if diner_match else context.expected_diners,
         budget_limit_cents=(
@@ -40,6 +43,7 @@ def _extract_constraints(text: str, context: PlanningContext) -> PlanningConstra
         ),
         dietary_style=["清淡"] if "清淡" in text else [],
         excluded_ingredients=["花生"] if "花生" in text else [],
+        preferred_dishes=preferred_dishes,
         prioritize_expiring="临期" in text or "到期" in text,
         time_limit_minutes=90,
     )
@@ -55,20 +59,23 @@ def _constraints_summary(constraints: PlanningConstraints) -> str:
         f"人数 {constraints.expected_diners or '未指定'}，预算 {budget}，"
         f"风格 {'、'.join(constraints.dietary_style) or '无'}，"
         f"排除 {'、'.join(constraints.excluded_ingredients) or '无'}，"
+        f"点名菜品 {'、'.join(constraints.preferred_dishes) or '无'}，"
         f"临期优先 {'是' if constraints.prioritize_expiring else '否'}"
     )
 
 
 _CONSTRAINT_SYSTEM_PROMPT = (
-    "你是机关食堂运营规划 Agent 的约束解析器。从用户需求中抽取结构化约束，"
+    "你是家庭厨房配餐 Agent 的约束解析器。从用户需求中抽取结构化约束，"
     "只输出一个 JSON 对象，不要输出解释或代码块标记。字段定义："
     '{"expected_diners": 用餐人数整数或null, '
     '"budget_limit_cents": 预算总金额（元乘以100）整数或null, '
     '"dietary_style": 口味风格标签数组如["清淡"], '
     '"excluded_ingredients": 排除食材名称数组, '
-    '"prioritize_expiring": 是否优先使用临期食材的布尔值, '
+    '"preferred_dishes": 用户明确想吃、指定或点名的菜品数组，如["豆角焖面"], '
+    '"prioritize_expiring": 是否优先使用临期食材的布尔值（必须为true或false，不能为null）, '
     '"time_limit_minutes": 出餐时长上限整数或null}。'
-    "无法确定的字段填 null 或空数组。金额必须换算为分。"
+    "无法确定的可空字段填 null，数组字段填空数组；prioritize_expiring 无法确定时填 false。"
+    "金额必须换算为分。"
 )
 
 
@@ -82,7 +89,10 @@ def _strip_code_fence(text: str) -> str:
 
 
 async def _parse_constraints_with_llm(
-    provider: LLMProvider | None, request_text: str, context: PlanningContext
+    provider: LLMProvider | None,
+    request_text: str,
+    context: PlanningContext,
+    on_thinking=None,
 ) -> tuple[PlanningConstraints, ToolTraceView, bool]:
     """返回 (约束, 解析轨迹, 是否成功使用模型)。模型不可用/失败时降级规则基线。"""
     settings = get_settings()
@@ -101,23 +111,45 @@ async def _parse_constraints_with_llm(
 
     started = time.perf_counter()
     try:
-        raw = await provider.chat(
-            messages=[
-                {"role": "system", "content": _CONSTRAINT_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"餐次上下文：{context.service_date} {context.meal_service_name}，"
-                        f"默认 {context.expected_diners} 人。"
-                        f"用户需求：{request_text}"
-                    ),
-                },
-            ]
-        )
+        parse_messages = [
+            {"role": "system", "content": _CONSTRAINT_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"餐次上下文：{context.service_date} {context.meal_service_name}，"
+                    f"默认 {context.expected_diners} 人。"
+                    f"用户需求：{request_text}"
+                ),
+            },
+        ]
+        raw = ""
+        # 兼容未实现 supports_stream 的旧 Provider(含测试替身):缺属性视为不支持流式
+        use_stream = bool(getattr(provider, "supports_stream", lambda: False)())
+        if use_stream:
+            # 思维链直播:模型推理增量实时回调,约束 JSON 从正文增量中累积
+            text_parts: list[str] = []
+            async for kind, delta in provider.chat_stream(messages=parse_messages):
+                if kind == "thinking" and on_thinking:
+                    on_thinking(delta)
+                elif kind == "text":
+                    text_parts.append(delta)
+            raw = "".join(text_parts)
+        if not raw:
+            raw = await provider.chat(messages=parse_messages)
         duration_ms = round((time.perf_counter() - started) * 1000)
         data = json.loads(_strip_code_fence(raw))
         if data.get("budget_limit_cents") is None and data.get("budget_yuan") is not None:
             data["budget_limit_cents"] = int(data.pop("budget_yuan")) * 100
+        # 云端模型偶尔会把未提及的布尔值返回为 null；业务默认值应为 False，
+        # 不能因为一个可安全归一化的字段让整条 Agent 链路降级。
+        if data.get("prioritize_expiring") is None:
+            data["prioritize_expiring"] = False
+        if data.get("dietary_style") is None:
+            data["dietary_style"] = []
+        if data.get("excluded_ingredients") is None:
+            data["excluded_ingredients"] = []
+        if data.get("preferred_dishes") is None:
+            data["preferred_dishes"] = []
         constraints = PlanningConstraints(**data)
         trace = ToolTraceView(
             tool_name="parse_request",
@@ -141,31 +173,8 @@ async def _parse_constraints_with_llm(
         return constraints, trace, False
 
 
-def _timed_tool(
-    name: str, input_summary: str, produce_output
-) -> tuple[ToolTraceView, object]:
-    """produce_output 返回展示字符串，或 (展示字符串, 数据负载) 二元组。"""
-    started = time.perf_counter()
-    result = produce_output()
-    duration_ms = round((time.perf_counter() - started) * 1000)
-    if isinstance(result, tuple) and len(result) == 2:
-        display, payload = result
-    else:
-        display, payload = result, None
-    return (
-        ToolTraceView(
-            tool_name=name,
-            status="success",
-            duration_ms=duration_ms,
-            input_summary=input_summary,
-            output_summary=str(display),
-        ),
-        payload,
-    )
-
-
 def _restriction_chips(context: PlanningContext, key_names: dict[str, str]) -> list[str]:
-    """食堂档案预置的用餐限制（allergy/dislike），与本次输入无关，用于 UI 明示来源。"""
+    """家庭档案预置的用餐限制（allergy/dislike），与本次输入无关，用于 UI 明示来源。"""
     chips = []
     for key, kind in context.restriction_types.items():
         label = "过敏原" if kind == "allergy" else "忌口"
@@ -174,10 +183,37 @@ def _restriction_chips(context: PlanningContext, key_names: dict[str, str]) -> l
 
 
 def _plan(
-    context: PlanningContext, constraints: PlanningConstraints, parse_trace: ToolTraceView
+    context: PlanningContext,
+    constraints: PlanningConstraints,
+    parse_trace: ToolTraceView,
+    on_step=None,
 ) -> tuple[list[ToolTraceView], list[MenuOption], list[str], list[str]]:
+    """on_step(state, tool_name, detail):每个工具开始/结束时实时回调,SSE 直播用。"""
     diners = constraints.expected_diners or context.expected_diners
     traces: list[ToolTraceView] = [parse_trace]
+
+    def _timed_tool(name: str, input_summary: str, produce_output):
+        if on_step:
+            on_step("running", name, input_summary)
+        started = time.perf_counter()
+        result = produce_output()
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        if isinstance(result, tuple) and len(result) == 2:
+            display, payload = result
+        else:
+            display, payload = result, None
+        if on_step:
+            on_step("done", name, str(display))
+        return (
+            ToolTraceView(
+                tool_name=name,
+                status="success",
+                duration_ms=duration_ms,
+                input_summary=input_summary,
+                output_summary=str(display),
+            ),
+            payload,
+        )
 
     trace, _ = _timed_tool(
         "get_meal_service_context",
@@ -197,23 +233,13 @@ def _plan(
     trace, _ = _timed_tool("list_inventory", "读取可用库存", _inventory_summary)
     traces.append(trace)
 
-    def _feedback_summary() -> str:
-        if context.feedback_count == 0:
-            return "暂无历史反馈，软评分取中性值"
-        tags = "、".join(context.feedback_top_tags) or "无标签"
-        avg = context.feedback_avg_rating or 0
-        detail = f"{context.feedback_count} 条反馈，平均 {avg:.1f} 分，主要标签：{tags}"
-        if context.dish_feedback:
-            top_dishes = sorted(
-                context.dish_feedback.items(), key=lambda kv: -kv[1].sample_count
-            )[:3]
-            detail += "；菜品聚合：" + "、".join(
-                f"{name} {stats.avg_rating:.1f} 分（{stats.sample_count} 条）"
-                for name, stats in top_dishes
-            )
-        return detail
+    def _member_constraints_summary() -> str:
+        """约束前置:汇总成员永久忌口/过敏与当日生效的特殊事件。"""
+        if not context.member_constraints:
+            return "全家当前没有生效的忌口或特殊事件"
+        return "；".join(constraint.summary for constraint in context.member_constraints)
 
-    trace, _ = _timed_tool("get_feedback_summary", "读取反馈聚合", _feedback_summary)
+    trace, _ = _timed_tool("get_member_constraints", "检查用餐限制", _member_constraints_summary)
     traces.append(trace)
 
     trace, _ = _timed_tool(
@@ -233,7 +259,7 @@ def _plan(
 
     trace, (kept, filtered_out) = _timed_tool(
         "filter_hard_constraints",
-        f"食堂档案限制：{'、'.join(workspace_restrictions) or '无'}",
+        f"家庭档案限制：{'、'.join(workspace_restrictions) or '无'}",
         _hard_filter,
     )
     traces.append(trace)
@@ -285,7 +311,9 @@ def _plan(
 
     def _procurement() -> str:
         lines = planning.procurement_lines(requirements, context, key_names)
-        detail = "、".join(f"{line['ingredient']} 缺 {line['missing_quantity']}" for line in lines[:5])
+        detail = "、".join(
+            f"{line['ingredient']} 缺 {line['missing_quantity']}" for line in lines[:5]
+        )
         return f"{len(lines)} 项采购缺口：{detail}"
 
     trace, _ = _timed_tool("build_procurement_list", "比对库存计算缺口", _procurement)
@@ -357,16 +385,27 @@ def _to_view(row: AgentRun) -> AgentRunView:
 
 
 async def create_run(
-    workspace_id: str, site_id: str, meal_service_id: str, request_text: str
+    workspace_id: str,
+    site_id: str,
+    meal_service_id: str,
+    request_text: str,
+    on_step=None,
+    on_thinking=None,
 ) -> AgentRunView:
     with SessionLocal() as session:
         context = load_planning_context(session, workspace_id, site_id, meal_service_id)
 
     provider = build_llm_provider(get_settings())
+    if on_step:
+        on_step("running", "parse_request", "解析人数、预算、点名菜品与忌口")
     constraints, parse_trace, used_llm = await _parse_constraints_with_llm(
-        provider, request_text, context
+        provider, request_text, context, on_thinking=on_thinking
     )
-    traces, options, warnings, workspace_restrictions = _plan(context, constraints, parse_trace)
+    if on_step:
+        on_step("done", "parse_request", parse_trace.output_summary)
+    traces, options, warnings, workspace_restrictions = _plan(
+        context, constraints, parse_trace, on_step=on_step
+    )
 
     settings = get_settings()
     run = AgentRunView(

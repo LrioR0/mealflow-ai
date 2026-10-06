@@ -12,9 +12,9 @@ def _create_run(client: TestClient) -> dict:
     created = client.post(
         "/api/v1/agent/runs",
         json={
-            "workspace_id": "demo-workspace",
-            "site_id": "demo-site",
-            "meal_service_id": "demo-lunch",
+            "workspace_id": "home-workspace",
+            "site_id": "home-kitchen",
+            "meal_service_id": "home-lunch",
             "request_text": "明天午餐 120 人，预算 900 元，清淡，优先临期番茄，不能含花生",
         },
     )
@@ -51,7 +51,7 @@ def test_confirm_and_publish_full_chain() -> None:
             run_row = session.get(AgentRun, run["id"])
             assert run_row.state["approval_status"] == "approved"
             assert run_row.status == AgentRunStatus.WAITING_APPROVAL.value
-            assert session.get(MealService, "demo-lunch").status == "draft"
+            assert session.get(MealService, "home-lunch").status == "draft"
 
         # 重复确认同一方案返回同一计划（不产生重复数据）
         again = _confirm(client, run)
@@ -73,7 +73,7 @@ def test_confirm_and_publish_full_chain() -> None:
 
         # 发布副作用：餐次 published、运行 PUBLISHED
         with SessionLocal() as session:
-            assert session.get(MealService, "demo-lunch").status == "published"
+            assert session.get(MealService, "home-lunch").status == "published"
             assert session.get(AgentRun, run["id"]).status == AgentRunStatus.PUBLISHED.value
 
         # 同键重放返回同一结果；换键重发冲突
@@ -140,8 +140,8 @@ def test_saved_plan_rows_are_scoped_to_workspace() -> None:
 
     with SessionLocal() as session:
         plan = session.get(MealPlan, plan_id)
-        assert plan.workspace_id == "demo-workspace"
-        assert plan.meal_service_id == "demo-lunch"
+        assert plan.workspace_id == "home-workspace"
+        assert plan.meal_service_id == "home-lunch"
         assert session.scalar(
             select(MealPlan).where(MealPlan.publish_idempotency_key == "unused-key")
         ) is None

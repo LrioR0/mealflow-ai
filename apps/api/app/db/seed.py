@@ -1,15 +1,15 @@
-"""种子数据脚本：预置演示机关食堂的完整数据闭环。
+"""种子数据脚本:预置家庭厨房演示数据(V2 家庭厨房主线)。
 
-按数据字典（docs/数据字典.md）与三天开发计划 Day 1 要求：
-- 示例机关食堂工作区、管理员账号、总部食堂站点、明日午餐餐次（120 人）
-- 食材主数据、库存（含 2 天内到期的临期番茄）、用餐限制（过敏原/忌口硬过滤）
-- data/seed/recipes.json 的可溯源种子菜谱
+- 家庭工作区("我家")、两名成员(我 / 对象)、成员永久忌口与过敏
+- 特殊事件:我感冒中(忌辛辣油腻)、对象例假期(忌辛辣生冷),按日期自动生效/过期
+- 冰箱库存(家庭单位,含临期食材)、食材主数据带市区大型超市参考价
+- data/seed/recipes.json 的可溯源菜谱(含口味 taste_tags,用于冲突检测)
 
-幂等：按天然键 upsert，可重复执行。运行：cd apps/api && python -m app.db.seed
+幂等:按天然键 upsert,可重复执行。运行:cd apps/api && python -m app.db.seed
 """
 
-import json
 import hashlib
+import json
 import secrets
 from datetime import date, timedelta
 from decimal import Decimal
@@ -22,8 +22,8 @@ from app.db.models import (
     DietaryRestriction,
     Ingredient,
     InventoryItem,
-    KioskDevice,
     MealService,
+    MemberEvent,
     Recipe,
     RecipeIngredient,
     Site,
@@ -32,70 +32,80 @@ from app.db.models import (
     WorkspaceMember,
 )
 from app.db.session import SessionLocal
-from app.services.feedback_service import hash_device_token
 
 RECIPE_SEED_PATH = Path(__file__).resolve().parents[4] / "data" / "seed" / "recipes.json"
 
-# 演示终端（评分终端设计 §3）：明文令牌仅在种子输出展示，服务端只存哈希
-DEMO_KIOSK_DEVICE_ID = "kiosk-demo-01"
-DEMO_KIOSK_TOKEN = "demo-kiosk-token"
+HOME_WORKSPACE_ID = "home-workspace"
+HOME_SITE_ID = "home-kitchen"
+HOME_MEAL_SERVICE_ID = "home-lunch"
+ME_USER_ID = "home-me"
+PARTNER_USER_ID = "home-partner"
+GUEST_USER_ID = "home-guest"
 
-INGREDIENTS: list[tuple[str, str, str, str]] = [
-    # (key, name, category, default_unit)
-    ("tomato", "番茄", "蔬菜", "kg"),
-    ("potato", "土豆", "蔬菜", "kg"),
-    ("greens", "青菜", "蔬菜", "kg"),
-    ("pepper_green", "青椒", "蔬菜", "kg"),
-    ("carrot", "胡萝卜", "蔬菜", "kg"),
-    ("onion", "洋葱", "蔬菜", "kg"),
-    ("mushroom", "香菇", "蔬菜", "kg"),
-    ("cucumber", "黄瓜", "蔬菜", "kg"),
-    ("eggplant", "茄子", "蔬菜", "kg"),
-    ("winter_melon", "冬瓜", "蔬菜", "kg"),
-    ("cilantro", "香菜", "蔬菜", "kg"),
-    ("garlic", "大蒜", "蔬菜", "kg"),
-    ("ginger", "生姜", "蔬菜", "kg"),
-    ("scallion", "小葱", "蔬菜", "kg"),
-    ("pork", "猪前腿肉", "肉禽", "kg"),
-    ("chicken_breast", "鸡胸肉", "肉禽", "kg"),
-    ("chicken_leg", "鸡腿", "肉禽", "kg"),
-    ("beef", "牛腩", "肉禽", "kg"),
-    ("egg", "鸡蛋", "蛋奶", "个"),
-    ("milk", "牛奶", "蛋奶", "L"),
-    ("fish", "草鱼", "水产", "kg"),
-    ("shrimp", "虾仁", "水产", "kg"),
-    ("tofu", "豆腐", "豆制品", "kg"),
-    ("rice", "大米", "主食", "kg"),
-    ("noodles", "挂面", "主食", "kg"),
-    ("flour", "面粉", "主食", "kg"),
-    ("peanut", "花生米", "坚果", "kg"),
-    ("seaweed", "紫菜", "水产干货", "kg"),
-    ("soy_sauce", "酱油", "调料", "L"),
-    ("salt", "盐", "调料", "kg"),
-    ("oil", "食用油", "调料", "L"),
-    ("vinegar", "香醋", "调料", "L"),
-    ("doubanjiang", "豆瓣酱", "调料", "kg"),
-    ("starch", "淀粉", "调料", "kg"),
+# (key, 名称, 类别, 默认单位, 市区大型超市参考价 元/单位)
+INGREDIENTS: list[tuple[str, str, str, str, str]] = [
+    ("tomato", "番茄", "蔬菜", "kg", "6.50"),
+    ("potato", "土豆", "蔬菜", "kg", "3.50"),
+    ("greens", "青菜", "蔬菜", "kg", "4.00"),
+    ("green_beans", "豆角", "蔬菜", "kg", "9.00"),
+    ("pepper_green", "青椒", "蔬菜", "kg", "5.00"),
+    ("carrot", "胡萝卜", "蔬菜", "kg", "4.00"),
+    ("onion", "洋葱", "蔬菜", "kg", "4.00"),
+    ("mushroom", "香菇", "蔬菜", "kg", "12.00"),
+    ("cucumber", "黄瓜", "蔬菜", "kg", "4.50"),
+    ("eggplant", "茄子", "蔬菜", "kg", "6.00"),
+    ("winter_melon", "冬瓜", "蔬菜", "kg", "3.00"),
+    ("cilantro", "香菜", "蔬菜", "kg", "8.00"),
+    ("garlic", "大蒜", "蔬菜", "kg", "10.00"),
+    ("ginger", "生姜", "蔬菜", "kg", "12.00"),
+    ("scallion", "小葱", "蔬菜", "kg", "8.00"),
+    ("pork", "猪前腿肉", "肉禽", "kg", "22.00"),
+    ("chicken_breast", "鸡胸肉", "肉禽", "kg", "16.00"),
+    ("chicken_leg", "鸡腿", "肉禽", "kg", "20.00"),
+    ("beef", "牛腩", "肉禽", "kg", "45.00"),
+    ("egg", "鸡蛋", "蛋奶", "个", "1.20"),
+    ("milk", "牛奶", "蛋奶", "L", "12.00"),
+    ("fish", "草鱼", "水产", "kg", "12.00"),
+    ("shrimp", "虾仁", "水产", "kg", "35.00"),
+    ("tofu", "豆腐", "豆制品", "kg", "6.00"),
+    ("rice", "大米", "主食", "kg", "6.00"),
+    ("noodles", "挂面", "主食", "kg", "8.00"),
+    ("flour", "面粉", "主食", "kg", "5.00"),
+    ("peanut", "花生米", "坚果", "kg", "12.00"),
+    ("seaweed", "紫菜", "水产干货", "kg", "20.00"),
+    ("soy_sauce", "酱油", "调料", "L", "10.00"),
+    ("salt", "盐", "调料", "kg", "4.00"),
+    ("oil", "食用油", "调料", "L", "15.00"),
+    ("vinegar", "香醋", "调料", "L", "8.00"),
+    ("doubanjiang", "豆瓣酱", "调料", "kg", "12.00"),
+    ("starch", "淀粉", "调料", "kg", "6.00"),
+    ("dried_chili", "干辣椒", "调料", "kg", "30.00"),
 ]
 
-# (ingredient_key, quantity, unit, expires_after_days or None)
+# (ingredient_key, 数量, 单位, days 到期 or None) —— 家庭冰箱真实存量
 INVENTORY: list[tuple[str, Decimal, str, int | None]] = [
-    ("tomato", Decimal("5"), "kg", 1),  # 明日到期：临期优先演示的关键数据
-    ("tofu", Decimal("2"), "kg", 2),
-    ("greens", Decimal("3"), "kg", 2),
-    ("egg", Decimal("60"), "个", 3),
-    ("chicken_leg", Decimal("4"), "kg", 3),
-    ("pork", Decimal("3"), "kg", 3),
-    ("potato", Decimal("8"), "kg", 7),
-    ("rice", Decimal("20"), "kg", None),
-    ("oil", Decimal("2"), "L", None),
-    ("salt", Decimal("1"), "kg", None),
+    ("egg", Decimal("6"), "个", 5),
+    ("tomato", Decimal("0.5"), "kg", 1),  # 明日到期:临期优先演示
+    ("greens", Decimal("0.3"), "kg", 2),
+    ("tofu", Decimal("0.4"), "kg", 2),
+    ("noodles", Decimal("0.5"), "kg", 30),
+    ("pork", Decimal("0.3"), "kg", 3),
+    ("potato", Decimal("1"), "kg", 7),
+    ("rice", Decimal("2"), "kg", None),
+    ("oil", Decimal("0.8"), "L", None),
+    ("salt", Decimal("0.3"), "kg", None),
 ]
 
-# 数据字典：allergy 与 dislike 均进入硬过滤
-RESTRICTIONS: list[tuple[str, str]] = [
-    ("allergy", "peanut"),
-    ("dislike", "cilantro"),
+# (user_id, 类型, ingredient_key):成员级永久忌口/过敏
+RESTRICTIONS: list[tuple[str, str, str]] = [
+    (PARTNER_USER_ID, "dislike", "cilantro"),  # 对象忌口香菜
+    (PARTNER_USER_ID, "allergy", "shrimp"),  # 对象虾过敏(硬过滤演示)
+]
+
+# (user_id, 事件类型, 约束 tags, 起始偏移天, 结束偏移天, 备注)
+MEMBER_EVENTS: list[tuple[str, str, list[str], int, int, str]] = [
+    (ME_USER_ID, "感冒", ["忌辛辣", "忌油腻", "宜清淡"], 0, 2, "正在感冒,饮食清淡少油"),
+    (PARTNER_USER_ID, "例假", ["忌辛辣", "忌生冷"], 0, 1, "例假期,忌辛辣生冷"),
 ]
 
 
@@ -105,94 +115,107 @@ def hash_demo_password(password: str) -> str:
     return f"pbkdf2_sha256$100000${salt}${digest.hex()}"
 
 
-def _get_or_create_ingredient(session: Session, key: str, name: str, category: str, unit: str) -> Ingredient:
+def _get_or_create_ingredient(
+    session: Session, key: str, name: str, category: str, unit: str, price: str
+) -> Ingredient:
     ingredient = session.scalar(select(Ingredient).where(Ingredient.key == key))
     if ingredient is None:
         ingredient = Ingredient(key=key, name=name, category=category, default_unit=unit)
         session.add(ingredient)
         session.flush()
+    ingredient.reference_price = Decimal(price)
+    ingredient.price_source = "市区大型超市公开参考价"
+    from app.db.models import utc_now
+
+    ingredient.price_updated_at = utc_now()
     return ingredient
+
+
+def _get_or_create_user(
+    session: Session, user_id: str, email: str, display_name: str
+) -> User:
+    user = session.get(User, user_id)
+    if user is None:
+        user = User(
+            id=user_id,
+            email=email,
+            password_hash=hash_demo_password("mealflow-demo"),
+            display_name=display_name,
+        )
+        session.add(user)
+        session.flush()
+    return user
 
 
 def seed_demo_data() -> dict[str, int]:
     with SessionLocal() as session:  # type: Session
         tomorrow = date.today() + timedelta(days=1)
+        today = date.today()
 
-        # 工作区与站点（固定 ID：前端与接口契约使用 demo-workspace / demo-site / demo-lunch）
-        workspace = session.get(Workspace, "demo-workspace")
+        # 家庭工作区 / 厨房站点 / 明天午餐餐次(2 人)
+        workspace = session.get(Workspace, HOME_WORKSPACE_ID)
         if workspace is None:
-            workspace = Workspace(id="demo-workspace", name="示例机关食堂", kind="organization")
+            workspace = Workspace(id=HOME_WORKSPACE_ID, name="我家", kind="personal")
             session.add(workspace)
             session.flush()
 
-        site = session.get(Site, "demo-site")
+        site = session.get(Site, HOME_SITE_ID)
         if site is None:
             site = Site(
-                id="demo-site", workspace_id=workspace.id, name="总部食堂", service_capacity=200
+                id=HOME_SITE_ID, workspace_id=workspace.id, name="家里厨房", service_capacity=4
             )
             session.add(site)
             session.flush()
 
-        # 预置演示管理员（V1 不开放真实登录）
-        admin = session.get(User, "demo-admin")
-        if admin is None:
-            admin = User(
-                id="demo-admin",
-                email="admin@mealflow.demo",
-                password_hash=hash_demo_password("mealflow-demo"),
-                display_name="演示管理员",
-            )
-            session.add(admin)
-            session.flush()
-        member = session.scalar(
-            select(WorkspaceMember).where(
-                WorkspaceMember.workspace_id == workspace.id, WorkspaceMember.user_id == admin.id
-            )
-        )
-        if member is None:
-            session.add(
-                WorkspaceMember(workspace_id=workspace.id, user_id=admin.id, role="owner")
-            )
+        me = _get_or_create_user(session, ME_USER_ID, "me@home.demo", "我")
+        me.gender = "男"
+        me.residency = "resident"
+        me.taboo = None
+        me.note = None
+        partner = _get_or_create_user(session, PARTNER_USER_ID, "partner@home.demo", "对象")
+        partner.gender = "女"
+        partner.residency = "resident"
+        partner.taboo = "香菜"
+        partner.note = None
+        guest = _get_or_create_user(session, GUEST_USER_ID, "guest@home.demo", "老李")
+        guest.gender = "男"
+        guest.residency = "guest"
+        guest.taboo = "海鲜"
+        guest.note = "周末偶尔来吃饭"
 
-        # 明日午餐餐次（120 人）
-        meal_service = session.get(MealService, "demo-lunch")
+        for user, role in ((me, "owner"), (partner, "member"), (guest, "guest")):
+            exists = session.scalar(
+                select(WorkspaceMember).where(
+                    WorkspaceMember.workspace_id == workspace.id,
+                    WorkspaceMember.user_id == user.id,
+                )
+            )
+            if exists is None:
+                session.add(
+                    WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role=role)
+                )
+
+        meal_service = session.get(MealService, HOME_MEAL_SERVICE_ID)
         if meal_service is None:
             meal_service = MealService(
-                id="demo-lunch",
+                id=HOME_MEAL_SERVICE_ID,
                 site_id=site.id,
                 name="午餐",
                 service_date=tomorrow,
-                expected_diners=120,
+                expected_diners=2,
                 status="draft",
             )
             session.add(meal_service)
-            session.flush()
         else:
             meal_service.service_date = tomorrow
-            meal_service.expected_diners = 120
+            meal_service.expected_diners = 2
 
-        # 演示 Kiosk 终端（绑定总部食堂，令牌哈希落库）
-        kiosk = session.scalar(
-            select(KioskDevice).where(KioskDevice.device_id == DEMO_KIOSK_DEVICE_ID)
-        )
-        if kiosk is None:
-            kiosk = KioskDevice(device_id=DEMO_KIOSK_DEVICE_ID)
-            session.add(kiosk)
-        kiosk.workspace_id = workspace.id
-        kiosk.site_id = site.id
-        kiosk.token_hash = hash_device_token(DEMO_KIOSK_TOKEN)
-        kiosk.status = "active"
-
-        # 食材主数据
-        ingredients: dict[str, Ingredient] = {}
-        for key, name, category, unit in INGREDIENTS:
-            ingredients[key] = _get_or_create_ingredient(session, key, name, category, unit)
-
-        # 用餐限制（硬过滤）
-        for restriction_type, ingredient_key in RESTRICTIONS:
+        # 成员永久忌口/过敏(user_id 挂到个人)
+        for user_id, restriction_type, ingredient_key in RESTRICTIONS:
             exists = session.scalar(
                 select(DietaryRestriction).where(
                     DietaryRestriction.workspace_id == workspace.id,
+                    DietaryRestriction.user_id == user_id,
                     DietaryRestriction.type == restriction_type,
                     DietaryRestriction.ingredient_key == ingredient_key,
                 )
@@ -201,12 +224,47 @@ def seed_demo_data() -> dict[str, int]:
                 session.add(
                     DietaryRestriction(
                         workspace_id=workspace.id,
+                        user_id=user_id,
                         type=restriction_type,
                         ingredient_key=ingredient_key,
                     )
                 )
 
-        # 库存（含临期番茄）
+        # 特殊事件(按日期窗口自动生效/过期)
+        for user_id, event_type, tags, start_offset, end_offset, note in MEMBER_EVENTS:
+            start = today + timedelta(days=start_offset)
+            end = today + timedelta(days=end_offset)
+            event = session.scalar(
+                select(MemberEvent).where(
+                    MemberEvent.workspace_id == workspace.id,
+                    MemberEvent.user_id == user_id,
+                    MemberEvent.event_type == event_type,
+                )
+            )
+            if event is None:
+                session.add(
+                    MemberEvent(
+                        workspace_id=workspace.id,
+                        user_id=user_id,
+                        event_type=event_type,
+                        constraint_tags=tags,
+                        start_date=start,
+                        end_date=end,
+                        note=note,
+                    )
+                )
+            else:
+                event.constraint_tags = tags
+                event.start_date = start
+                event.end_date = end
+                event.note = note
+
+        # 食材主数据(带超市参考价)
+        ingredients: dict[str, Ingredient] = {}
+        for key, name, category, unit, price in INGREDIENTS:
+            ingredients[key] = _get_or_create_ingredient(session, key, name, category, unit, price)
+
+        # 冰箱库存(含临期)
         for ingredient_key, quantity, unit, expires_after_days in INVENTORY:
             item = session.scalar(
                 select(InventoryItem).where(
@@ -234,7 +292,7 @@ def seed_demo_data() -> dict[str, int]:
                 item.unit = unit
                 item.expires_on = expires_on
 
-        # 菜谱与配方明细（data/seed/recipes.json，可溯源）
+        # 菜谱与配方明细(data/seed/recipes.json,含 taste_tags)
         payload = json.loads(RECIPE_SEED_PATH.read_text(encoding="utf-8"))
         recipe_count = 0
         for entry in payload["recipes"]:
@@ -247,6 +305,7 @@ def seed_demo_data() -> dict[str, int]:
             recipe.kcal_per_serving = entry["kcal_per_serving"]
             recipe.estimated_cost_cents = entry["estimated_cost_cents"]
             recipe.tags = entry["tags"]
+            recipe.taste_tags = entry.get("taste_tags", [])
             recipe.allergens = entry["allergens"]
             recipe.steps = entry["steps"]
             recipe.source_name = entry["source_name"]
@@ -270,14 +329,23 @@ def seed_demo_data() -> dict[str, int]:
             recipe_count += 1
 
         session.commit()
-        return {"recipes": recipe_count, "ingredients": len(ingredients)}
+        return {
+            "members": 3,
+            "events": len(MEMBER_EVENTS),
+            "recipes": recipe_count,
+            "ingredients": len(ingredients),
+            "inventory": len(INVENTORY),
+        }
 
 
 def main() -> None:
     counts = seed_demo_data()
-    print(f"种子数据完成：{counts['recipes']} 道菜谱，{counts['ingredients']} 种食材。")
-    print("演示场景：示例机关食堂 / 总部食堂 / 明日午餐 120 人 / 临期番茄 / 花生过敏硬过滤。")
-    print(f"演示 Kiosk 设备 {DEMO_KIOSK_DEVICE_ID} 令牌：{DEMO_KIOSK_TOKEN}（请求头 X-Kiosk-Token）。")
+    print(
+        f"家庭厨房种子完成:{counts['members']} 名成员(含 1 位访客),{counts['events']} 条特殊事件,"
+        f"{counts['recipes']} 道菜谱,{counts['ingredients']} 种食材(含超市参考价),"
+        f"冰箱 {counts['inventory']} 项库存。"
+    )
+    print("演示场景:我感冒中(忌辛辣油腻)/ 对象例假期+忌香菜+虾过敏 / 明天午餐 2 人 / 辣子鸡冲突警示。")
 
 
 if __name__ == "__main__":

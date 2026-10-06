@@ -1,6 +1,7 @@
-"""规划上下文加载：Agent 感知工具的数据来源。
+"""规划上下文加载:Agent 感知工具的数据来源。
 
-按技术开发文档分层约定，Service 通过本模块读取数据，Rule Engine 保持无副作用。
+家庭厨房版:约束前置 —— 成员档案(永久忌口/过敏)+ 特殊事件(带生效期)
+在每轮规划前加载,确定性工具保持无副作用。
 """
 
 from dataclasses import dataclass, field
@@ -12,18 +13,21 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     DietaryRestriction,
-    Feedback,
     Ingredient,
     InventoryItem,
-    MealPlan,
     MealService,
+    MemberEvent,
     Recipe,
     RecipeIngredient,
     Site,
+    User,
     Workspace,
+    WorkspaceMember,
 )
 
 EXPIRING_WINDOW_DAYS = 2
+
+RESTRICTION_LABELS = {"allergy": "过敏", "dislike": "忌口"}
 
 
 class ScopeNotFoundError(LookupError):
@@ -63,7 +67,9 @@ class RecipeContext:
     kcal_per_serving: int | None
     estimated_cost_cents: int | None
     tags: list[str]
+    taste_tags: list[str]
     allergens: list[str]
+    steps: list[str] = field(default_factory=list)
     ingredients: list[RecipeIngredientLine] = field(default_factory=list)
 
     @property
@@ -72,12 +78,24 @@ class RecipeContext:
 
 
 @dataclass
-class DishFeedbackStats:
-    """单道菜的历史反馈聚合（来自包含该菜的已保存菜单计划）。"""
+class MemberProfile:
+    """家庭成员。"""
 
-    avg_rating: float
-    sample_count: int
-    top_tags: list[str] = field(default_factory=list)
+    user_id: str
+    display_name: str
+
+
+@dataclass
+class MemberConstraint:
+    """一条生效中的成员约束:永久忌口/过敏,或特殊事件派生的口味禁忌。"""
+
+    user_id: str
+    member_name: str
+    kind: str  # "restriction" | "event"
+    level: str  # "forbidden"(过敏,硬过滤) | "warn"(不建议)
+    summary: str  # 人话描述,如 "对象·忌口香菜" / "对象·例假期(忌辛辣、忌生冷)"
+    ingredient_key: str | None = None  # restriction:受限食材 key
+    avoid_tags: list[str] = field(default_factory=list)  # event:冲突口味,如 ["辛辣","油腻"]
 
 
 @dataclass
@@ -92,13 +110,12 @@ class PlanningContext:
     budget_limit_cents: int | None
     inventory: list[InventoryLine]
     recipes: list[RecipeContext]
+    members: list[MemberProfile]
+    member_constraints: list[MemberConstraint]
     excluded_keys: list[str]
-    feedback_count: int
-    feedback_avg_rating: float | None
-    feedback_top_tags: list[str]
-    # 数据字典：用餐限制区分 allergy / dislike，均进入硬过滤；用于向管理员解释来源
+    # 数据字典:用餐限制区分 allergy / dislike,均进入硬过滤;用于解释来源
     restriction_types: dict[str, str] = field(default_factory=dict)
-    dish_feedback: dict[str, DishFeedbackStats] = field(default_factory=dict)
+    dish_feedback: dict[str, "DishFeedbackStats"] = field(default_factory=dict)
 
     def expiring_keys(self, today: date) -> set[str]:
         return {line.key for line in self.inventory if line.is_expiring(today)}
@@ -115,6 +132,18 @@ class PlanningContext:
                 return line.unit
         return None
 
+    def active_event_summaries(self) -> list[str]:
+        return [c.summary for c in self.member_constraints if c.kind == "event"]
+
+
+@dataclass
+class DishFeedbackStats:
+    """单道菜的历史反馈聚合(预留:家庭版可通过对话记录点赞/踩)。"""
+
+    avg_rating: float
+    sample_count: int
+    top_tags: list[str] = field(default_factory=list)
+
 
 def load_planning_context(
     session: Session, workspace_id: str, site_id: str, meal_service_id: str
@@ -128,6 +157,19 @@ def load_planning_context(
     meal_service = session.get(MealService, meal_service_id)
     if meal_service is None or meal_service.site_id != site.id:
         raise ScopeNotFoundError(f"meal_service {meal_service_id} 不存在或不属于该站点")
+    service_date = meal_service.service_date
+
+    # 家庭成员
+    member_rows = session.execute(
+        select(User, WorkspaceMember)
+        .join(WorkspaceMember, WorkspaceMember.user_id == User.id)
+        .where(WorkspaceMember.workspace_id == workspace.id)
+    ).all()
+    members = [
+        MemberProfile(user_id=user.id, display_name=user.display_name)
+        for user, _member in member_rows
+    ]
+    member_names = {member.user_id: member.display_name for member in members}
 
     # 库存
     inventory: list[InventoryLine] = []
@@ -178,56 +220,65 @@ def load_planning_context(
                 kcal_per_serving=recipe.kcal_per_serving,
                 estimated_cost_cents=recipe.estimated_cost_cents,
                 tags=recipe.tags,
+                taste_tags=recipe.taste_tags or [],
                 allergens=recipe.allergens,
+                steps=recipe.steps or [],
                 ingredients=ingredients_by_recipe.get(recipe.id, []),
             )
         )
 
-    # 用餐限制（过敏原与忌口，硬过滤；保留类型用于解释来源）
-    restriction_pairs = session.execute(
-        select(DietaryRestriction.ingredient_key, DietaryRestriction.type).where(
-            DietaryRestriction.workspace_id == workspace.id
-        )
+    # 约束前置:永久忌口/过敏(成员级或全家共享)+ 当日生效的特殊事件
+    member_constraints: list[MemberConstraint] = []
+    excluded_keys: list[str] = []
+    restriction_types: dict[str, str] = {}
+    restriction_rows = session.execute(
+        select(DietaryRestriction, User)
+        .join(User, User.id == DietaryRestriction.user_id, isouter=True)
+        .where(DietaryRestriction.workspace_id == workspace.id)
     ).all()
-    excluded_keys = [key for key, _ in restriction_pairs]
-    restriction_types = dict(restriction_pairs)
+    for restriction, user in restriction_rows:
+        member_name = user.display_name if user else "全家"
+        label = RESTRICTION_LABELS.get(restriction.type, restriction.type)
+        summary = f"{member_name}·{label}{restriction.ingredient_key}"
+        level = "forbidden" if restriction.type == "allergy" else "warn"
+        member_constraints.append(
+            MemberConstraint(
+                user_id=restriction.user_id or "",
+                member_name=member_name,
+                kind="restriction",
+                level=level,
+                summary=summary,
+                ingredient_key=restriction.ingredient_key,
+            )
+        )
+        excluded_keys.append(restriction.ingredient_key)
+        restriction_types[restriction.ingredient_key] = restriction.type
 
-    # 历史反馈聚合（按餐次与菜品；可疑批次只作提示，不进入聚合）
-    feedback_rows = session.execute(
-        select(Feedback, MealPlan)
-        .join(MealPlan, MealPlan.id == Feedback.meal_plan_id)
+    event_rows = session.execute(
+        select(MemberEvent, User)
+        .join(User, User.id == MemberEvent.user_id)
         .where(
-            Feedback.meal_service_id == meal_service.id,
-            Feedback.is_suspicious == False,  # noqa: E712 —— 可疑批次不参与统计
+            MemberEvent.workspace_id == workspace.id,
+            MemberEvent.start_date <= service_date,
+            MemberEvent.end_date >= service_date,
         )
     ).all()
-
-    ratings: list[int] = []
-    tag_counter: dict[str, int] = {}
-    dish_ratings: dict[str, list[int]] = {}
-    dish_tags: dict[str, dict[str, int]] = {}
-    for row, plan in feedback_rows:
-        ratings.append(row.rating)
-        for tag in row.tags or []:
-            tag_counter[tag] = tag_counter.get(tag, 0) + 1
-        for dish in (item["name"] for item in plan.items or []):
-            dish_ratings.setdefault(dish, []).append(row.rating)
-            for tag in row.tags or []:
-                dish_tags.setdefault(dish, {})
-                dish_tags[dish][tag] = dish_tags[dish].get(tag, 0) + 1
-    avg_rating = sum(ratings) / len(ratings) if ratings else None
-    top_tags = [tag for tag, _ in sorted(tag_counter.items(), key=lambda kv: -kv[1])[:3]]
-    dish_feedback = {
-        dish: DishFeedbackStats(
-            avg_rating=round(sum(dish_rating_list) / len(dish_rating_list), 2),
-            sample_count=len(dish_rating_list),
-            top_tags=[
-                tag
-                for tag, _ in sorted(dish_tags.get(dish, {}).items(), key=lambda kv: -kv[1])[:3]
-            ],
+    for event, user in event_rows:
+        member_name = user.display_name if user else "家庭成员"
+        avoid_tags = [tag.removeprefix("忌") for tag in event.constraint_tags if tag.startswith("忌")]
+        prefer_tags = [tag.removeprefix("宜") for tag in event.constraint_tags if tag.startswith("宜")]
+        detail = "、".join(event.constraint_tags)
+        member_constraints.append(
+            MemberConstraint(
+                user_id=event.user_id,
+                member_name=member_name,
+                kind="event",
+                level="warn",
+                summary=f"{member_name}·{event.event_type}({detail})",
+                avoid_tags=avoid_tags,
+            )
         )
-        for dish, dish_rating_list in dish_ratings.items()
-    }
+        _ = prefer_tags  # 预留:宜XX作为加分项进入评分
 
     return PlanningContext(
         workspace_id=workspace.id,
@@ -235,15 +286,13 @@ def load_planning_context(
         site_name=site.name,
         meal_service_id=meal_service.id,
         meal_service_name=meal_service.name,
-        service_date=meal_service.service_date,
+        service_date=service_date,
         expected_diners=meal_service.expected_diners,
         budget_limit_cents=meal_service.budget_limit_cents,
         inventory=inventory,
         recipes=recipes,
+        members=members,
+        member_constraints=member_constraints,
         excluded_keys=excluded_keys,
         restriction_types=restriction_types,
-        feedback_count=len(ratings),
-        feedback_avg_rating=avg_rating,
-        feedback_top_tags=top_tags,
-        dish_feedback=dish_feedback,
     )

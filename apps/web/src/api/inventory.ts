@@ -1,5 +1,7 @@
 import { apiRequest } from './client'
 
+export const HOME_WORKSPACE_ID = 'home-workspace'
+
 export interface InventoryItem {
   id: string
   ingredient_key: string
@@ -25,11 +27,14 @@ export interface InventoryCreateInput {
   expires_on?: string | null
 }
 
-export function fetchInventory(workspaceId = 'demo-workspace'): Promise<InventoryItem[]> {
+export function fetchInventory(workspaceId = HOME_WORKSPACE_ID): Promise<InventoryItem[]> {
   return apiRequest(`/workspaces/${workspaceId}/inventory`)
 }
 
-export function addInventoryItem(payload: InventoryCreateInput, workspaceId = 'demo-workspace'): Promise<InventoryItem> {
+export function addInventoryItem(
+  payload: InventoryCreateInput,
+  workspaceId = HOME_WORKSPACE_ID,
+): Promise<InventoryItem> {
   return apiRequest(`/workspaces/${workspaceId}/inventory`, {
     method: 'POST',
     body: JSON.stringify(payload),

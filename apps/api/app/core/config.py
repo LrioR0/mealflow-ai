@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     demo_mode: bool = True
 
     llm_provider: str = "qwen"
+    llm_api_style: str = "chat_completions"
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""

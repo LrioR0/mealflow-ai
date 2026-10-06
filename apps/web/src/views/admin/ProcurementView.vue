@@ -1,244 +1,190 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-
-import { fetchIngredients, type IngredientOption } from '../../api/inventory'
-import { fetchLatestAgentRun } from '../../api/procurement'
-import type { AgentRun, MenuOption } from '../../types/agent'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Delete, Plus, ShoppingCart } from '@element-plus/icons-vue'
+import { readProcurement, saveProcurement, type ProcurementItem } from '../../composables/procurement'
 
 defineOptions({ name: 'ProcurementView' })
 
-const run = ref<AgentRun | null>(null)
-const ingredients = ref<IngredientOption[]>([])
-const loading = ref(true)
-const error = ref('')
-const notStarted = ref(false)
-const selectedStrategy = ref('')
+const items = ref<ProcurementItem[]>([])
+const showAddDialog = ref(false)
+const submitting = ref(false)
+const form = reactive({ ingredient: '', quantity: '', unit: '份' })
 
-const option = computed(
-  () => run.value?.options.find((item) => item.strategy === selectedStrategy.value) ?? null,
-)
-
-const categoryByName = computed(() => {
-  const map = new Map<string, string>()
-  for (const item of ingredients.value) map.set(item.name, item.category)
-  return map
-})
-
-interface ProcurementRow {
-  ingredient: string
-  category: string
-  required: string
-  available: string
-  missing: string
-  unit: string
+function uid() {
+  return typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-const rows = computed<ProcurementRow[]>(() =>
-  (option.value?.procurement_list ?? []).map((row) => ({
-    ingredient: String(row.ingredient ?? ''),
-    category: categoryByName.value.get(String(row.ingredient ?? '')) ?? '—',
-    required: String(row.required ?? ''),
-    available: String(row.available ?? ''),
-    missing: String(row.missing_quantity ?? ''),
-    unit: String(row.unit ?? ''),
-  })),
-)
-
-function score(item: MenuOption): string {
-  const total = item.score_breakdown?.total
-  return typeof total === 'number' ? `${total.toFixed(3)} 分` : ''
+function load() {
+  items.value = readProcurement()
 }
 
-function money(cents: number) {
-  return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY' }).format(cents / 100)
-}
-
-async function load() {
-  loading.value = true
-  error.value = ''
-  notStarted.value = false
+function persist() {
   try {
-    const [latest, ingredientList] = await Promise.all([fetchLatestAgentRun(), fetchIngredients()])
-    run.value = latest
-    ingredients.value = ingredientList
-    selectedStrategy.value = latest.options[0]?.strategy ?? ''
-  } catch (reason) {
-    run.value = null
-    if (reason instanceof Error && reason.message.includes('No agent runs yet')) {
-      notStarted.value = true
-    } else {
-      error.value = reason instanceof Error ? reason.message : '加载采购清单失败'
-    }
-  } finally {
-    loading.value = false
+    saveProcurement(items.value)
+    return true
+  } catch {
+    ElMessage.error('保存失败，请检查浏览器存储空间')
+    load()
+    return false
   }
 }
 
 onMounted(load)
 
-function exportCsv() {
-  if (!option.value) return
-  const header = ['品类', '食材', '需求量', '当前库存', '缺口', '单位']
-  const table = [
-    header,
-    ...rows.value.map((row) => [
-      row.category,
-      row.ingredient,
-      row.required,
-      row.available,
-      row.missing,
-      row.unit,
-    ]),
-  ]
-  const csv =
-    '\uFEFF' +
-    table.map((cells) => cells.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\r\n')
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = `采购清单_${option.value.title}.csv`
-  anchor.click()
-  URL.revokeObjectURL(url)
+const pendingItems = computed(() => items.value.filter((item) => !item.checked))
+const completedItems = computed(() => items.value.filter((item) => item.checked))
+
+function openAdd() {
+  Object.assign(form, { ingredient: '', quantity: '', unit: '份' })
+  showAddDialog.value = true
+}
+
+function addManual() {
+  if (!form.ingredient.trim()) {
+    ElMessage.warning('请填写采购食材')
+    return
+  }
+  submitting.value = true
+  items.value.unshift({
+    id: uid(),
+    ingredient: form.ingredient.trim(),
+    quantity: form.quantity.trim() || '—',
+    unit: form.unit.trim() || '份',
+    checked: false,
+    source: 'manual',
+  })
+  const saved = persist()
+  submitting.value = false
+  if (!saved) return
+  showAddDialog.value = false
+  ElMessage.success('已加入采购清单')
+}
+
+function toggle(item: ProcurementItem) {
+  item.checked = !item.checked
+  persist()
+}
+
+async function remove(item: ProcurementItem) {
+  try {
+    await ElMessageBox.confirm(`确定移除「${item.ingredient}」吗？`, '删除采购项', {
+      type: 'warning',
+      confirmButtonText: '移除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  items.value = items.value.filter((current) => current.id !== item.id)
+  persist()
+}
+
+function clearCompleted() {
+  items.value = items.value.filter((item) => !item.checked)
+  if (persist()) ElMessage.success('已清理已购买项目')
 }
 </script>
 
 <template>
-  <section class="panel">
-    <div class="panel-heading">
+  <section class="procurement-page">
+    <header class="page-hero">
       <div>
-        <small>DETERMINISTIC RESULT</small>
+        <span class="eyebrow">SMART SHOPPING LIST</span>
         <h2>采购清单</h2>
+        <p>Agent 会把方案里的冰箱缺口整理到这里，也可以随手补充想买的食材。</p>
       </div>
-      <button class="ghost-button" :disabled="loading" @click="load">
-        {{ loading ? '加载中…' : '刷新最新运行' }}
-      </button>
+      <el-button type="primary" :icon="Plus" @click="openAdd">手动添加</el-button>
+    </header>
+
+    <div class="summary-strip">
+      <div><span>待采购</span><strong>{{ pendingItems.length }}</strong><small>项</small></div>
+      <div><span>已购买</span><strong>{{ completedItems.length }}</strong><small>项</small></div>
+      <div><span>清单总计</span><strong>{{ items.length }}</strong><small>项</small></div>
+      <div><span>来源</span><strong>AI</strong><small>+ 手动</small></div>
     </div>
-    <p class="muted">
-      采购缺口 = 菜单所需量 − 可用库存；由后端工具计算，不由大模型生成。数据来自最近一次
-      Agent 运行，可先在 Agent 决策页生成或 What-if 重规划。
-    </p>
 
-    <p v-if="error" class="error-message">{{ error }}</p>
-
-    <article v-if="notStarted" class="empty-procurement">
-      <strong>还没有 Agent 运行记录</strong>
-      <p>到 Agent 决策页生成三套方案后，这里会展示对应餐次的采购缺口与导出。</p>
-      <router-link class="primary-button" to="/admin/agent">去 Agent 决策页</router-link>
-    </article>
-
-    <template v-if="run && !notStarted">
-      <div class="run-summary">
+    <div class="procurement-list-wrap">
+      <div class="list-heading">
         <div>
-          <small>最新运行</small>
-          <span>{{ run.id.slice(0, 8) }}</span>
+          <strong>待采购食材</strong>
+          <small>勾选后会移动到已购买</small>
         </div>
-        <div>
-          <small>运行状态</small>
-          <strong>{{ run.status }}</strong>
-        </div>
-        <div>
-          <small>预计人数</small>
-          <span>{{ run.constraints.expected_diners ?? '待确认' }} 人</span>
-        </div>
+        <el-button v-if="completedItems.length" size="small" text @click="clearCompleted">清理已购买</el-button>
       </div>
 
-      <p v-for="warning in run.warnings" :key="warning" class="warning-text">{{ warning }}</p>
-
-      <div class="strategy-tabs">
-        <button
-          v-for="item in run.options"
-          :key="item.strategy"
-          class="strategy-tab"
-          :class="{ active: selectedStrategy === item.strategy }"
-          @click="selectedStrategy = item.strategy"
-        >
-          <strong>{{ item.title }}</strong>
-          <small>{{ score(item) }} · 成本 {{ money(item.estimated_cost_cents) }}</small>
-        </button>
+      <div v-if="pendingItems.length" class="shopping-list">
+        <div v-for="item in pendingItems" :key="item.id" class="shopping-item">
+          <el-checkbox :model-value="item.checked" @change="toggle(item)">
+            <span class="shopping-name">{{ item.ingredient }}</span>
+          </el-checkbox>
+          <span class="shopping-quantity">缺 {{ item.quantity }}{{ item.unit }}</span>
+          <el-tag size="small" :type="item.source === 'agent' ? 'success' : 'info'" effect="plain">
+            {{ item.source === 'agent' ? 'Agent 推荐' : '手动添加' }}
+          </el-tag>
+          <el-button :icon="Delete" size="small" text type="danger" @click="remove(item)" />
+        </div>
+      </div>
+      <div v-else class="empty-state procurement-empty">
+        <el-icon><ShoppingCart /></el-icon>
+        <h3>采购清单还是空的</h3>
+        <p>在智能配餐中确认方案，或手动添加需要购买的食材。</p>
+        <el-button type="primary" @click="openAdd">添加第一项</el-button>
       </div>
 
-      <div v-if="rows.length" class="table-wrap">
-        <table>
-          <thead>
-            <tr><th>品类</th><th>食材</th><th>所需</th><th>库存</th><th>缺口</th><th>单位</th></tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in rows" :key="row.ingredient">
-              <td>{{ row.category }}</td>
-              <td><strong>{{ row.ingredient }}</strong></td>
-              <td>{{ row.required }}</td>
-              <td>{{ row.available }}</td>
-              <td class="missing">{{ row.missing }}</td>
-              <td>{{ row.unit }}</td>
-            </tr>
-          </tbody>
-        </table>
+      <div v-if="completedItems.length" class="completed-section">
+        <div class="list-heading"><strong>已购买</strong><small>{{ completedItems.length }} 项</small></div>
+        <div class="shopping-list completed-list">
+          <div v-for="item in completedItems" :key="item.id" class="shopping-item checked">
+            <el-checkbox :model-value="item.checked" @change="toggle(item)">
+              <span class="shopping-name">{{ item.ingredient }}</span>
+            </el-checkbox>
+            <span class="shopping-quantity">{{ item.quantity }}{{ item.unit }}</span>
+            <el-button :icon="Delete" size="small" text type="danger" @click="remove(item)" />
+          </div>
+        </div>
       </div>
-      <p v-else class="muted">当前方案库存充足，没有采购缺口。</p>
+    </div>
 
-      <button v-if="rows.length" class="ghost-button" @click="exportCsv">导出 CSV</button>
-    </template>
+    <el-dialog v-model="showAddDialog" title="手动添加采购项" width="440px" destroy-on-close>
+      <el-form label-position="top" @submit.prevent="addManual">
+        <el-form-item label="食材名称" required>
+          <el-input v-model="form.ingredient" maxlength="30" placeholder="例如：橄榄油、香菜" />
+        </el-form-item>
+        <div class="form-grid two">
+          <el-form-item label="数量">
+            <el-input v-model="form.quantity" placeholder="例如：1" />
+          </el-form-item>
+          <el-form-item label="单位">
+            <el-input v-model="form.unit" maxlength="8" placeholder="例如：份、瓶、kg" />
+          </el-form-item>
+        </div>
+      </el-form>
+      <template #footer>
+        <el-button @click="showAddDialog = false">取消</el-button>
+        <el-button type="primary" :loading="submitting" @click="addManual">加入清单</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <style scoped>
-.empty-procurement {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.5rem;
-  margin-top: 1rem;
-  padding: 1.25rem;
-  border: 1px dashed var(--border);
-  border-radius: 12px;
-}
-.run-summary {
-  display: flex;
-  gap: 2rem;
-  margin-top: 1rem;
-  padding: 0.85rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-}
-.run-summary small {
-  display: block;
-  color: var(--muted);
-}
-.warning-text {
-  color: #a43c36;
-  font-size: 13px;
-}
-.strategy-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-  margin-top: 1rem;
-}
-.strategy-tab {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.15rem;
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: white;
-  cursor: pointer;
-}
-.strategy-tab.active {
-  border-color: var(--green);
-  background: #eef5f2;
-}
-.strategy-tab small {
-  color: var(--muted);
-}
-.table-wrap table {
-  width: 100%;
-  margin-top: 1rem;
-  font-size: 0.9rem;
-}
-.panel > .ghost-button {
-  margin-top: 0.9rem;
-}
+.procurement-page { max-width: 1180px; width: 100%; height: calc(100vh - 118px); min-height: 0; margin: 0 auto; display: flex; flex-direction: column; overflow: hidden; }
+.procurement-list-wrap { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 4px 28px 0; scrollbar-gutter: stable; }
+.list-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.list-heading div { display: grid; gap: 3px; }
+.list-heading small { color: var(--muted); font-size: 12px; }
+.shopping-list { display: grid; gap: 8px; }
+.shopping-item { display: flex; align-items: center; gap: 14px; min-height: 58px; padding: 10px 13px; border: 1px solid var(--border); border-radius: 13px; background: #fff; box-shadow: 0 4px 15px rgba(33,60,54,.035); }
+.shopping-item:hover { border-color: #b9d2c8; box-shadow: 0 8px 22px rgba(33,60,54,.08); }
+.shopping-item :deep(.el-checkbox) { flex: 1; min-width: 180px; margin-right: auto; }
+.shopping-name { color: var(--ink); font-weight: 650; }
+.shopping-quantity { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.shopping-item.checked { opacity: .62; background: #f7f9f6; }
+.shopping-item.checked .shopping-name { text-decoration: line-through; }
+.completed-section { margin-top: 28px; }
+.completed-list { opacity: .9; }
+.procurement-empty { margin-top: 20px; }
 </style>
