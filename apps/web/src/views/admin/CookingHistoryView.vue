@@ -123,10 +123,18 @@ function placeholder(title: string, from: string, to: string) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`
 }
 
+const phoneShotDefaults: Record<string, string> = {
+  '豆角焖面': '/images/cooking-history/green-bean-braised-noodles-phone.png',
+}
+
+function fallbackCover(title: string) {
+  return phoneShotDefaults[title] || placeholder(title, '#315d54', '#c69b53')
+}
+
 function fromApi(record: CookingRecordPayload): CookingRecord {
   return {
     id: record.id ?? uid(),
-    image: record.image || placeholder(record.dish_name, '#315d54', '#c69b53'),
+    image: record.image || fallbackCover(record.dish_name),
     dishName: record.dish_name,
     cook: record.cook,
     cookedAt: record.cooked_at,
@@ -298,7 +306,7 @@ async function submitRecord() {
   const existing = records.value.find((item) => item.id === editingId.value)
   const record: CookingRecord = {
     id: existing?.id ?? uid(),
-    image: form.image || placeholder(form.dishName.trim(), '#315d54', '#c69b53'),
+    image: form.image || fallbackCover(form.dishName.trim()),
     dishName: form.dishName.trim(),
     cook: form.cook.trim(),
     cookedAt: form.cookedAt,
@@ -495,4 +503,7 @@ onMounted(load)
 /* 页面固定,仅下厨记录列表滚动 */
 .footprint-page { height: calc(100vh - 118px); min-height: 0; padding-bottom: 0; display: flex; flex-direction: column; overflow: hidden; }
 .footprint-page .record-grid { flex: 1; min-height: 0; overflow-y: auto; align-content: start; padding: 0 4px 18px 0; scrollbar-gutter: stable; }
+.cover-wrap { background: #e8e4da; }
+.cover-wrap img,
+.detail-cover { object-position: center 54%; filter: saturate(.94) contrast(.98) brightness(1.01); }
 </style>
