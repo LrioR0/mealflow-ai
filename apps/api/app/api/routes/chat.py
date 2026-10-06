@@ -13,7 +13,7 @@ router = APIRouter(prefix="/agent/chat", tags=["chat"])
 
 @router.post("/stream")
 async def stream_chat(payload: ChatStreamRequest) -> StreamingResponse:
-    """SSE 流式对话:thinking → status → text → plan → questions → done。"""
+    """SSE 流式对话:status(动态工具步骤) / thinking / text / candidates 交错产出 → done。"""
     return StreamingResponse(
         chat_service.stream_chat(payload),
         media_type="text/event-stream",

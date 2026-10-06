@@ -8,6 +8,8 @@ class ChatStreamRequest(BaseModel):
     workspace_id: str = "home-workspace"
     site_id: str = "home-kitchen"
     meal_service_id: str = "home-lunch"
+    # 本次勾选的用餐成员;为空视为全员。忌口/特殊事件检查按此过滤
+    diners_user_ids: list[str] | None = None
     message: str = Field(min_length=1, max_length=2000)
 
 

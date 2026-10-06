@@ -25,6 +25,8 @@ defineOptions({ name: 'ConversationWorkbench' })
 
 interface StatusStep {
   step: string
+  /** 后端按本次工具调用动态生成的步骤名,优先于本地标签表显示 */
+  label?: string
   state: 'running' | 'done'
   detail: string
 }
@@ -194,8 +196,8 @@ function scrollBottom() {
   })
 }
 
-function stepLabel(step: string): string {
-  return STEP_LABELS[step] ?? step
+function stepLabel(stepItem: StatusStep): string {
+  return stepItem.label || STEP_LABELS[stepItem.step] || stepItem.step
 }
 
 function strategySummary(strategy: string): string {
@@ -392,19 +394,20 @@ async function send(preset?: string) {
         }, 700)
       } else if (event.event === 'status') {
         const step = String(event.data.step ?? '')
+        const label = String(event.data.label ?? '')
         const state = event.data.state === 'running' ? 'running' : 'done'
         const detail = String(event.data.detail ?? '')
         if (state === 'running') {
-          assistant.steps.push({ step, state, detail: '' })
+          assistant.steps.push({ step, label, state, detail: '' })
         } else {
           const reverseIdx = [...assistant.steps]
             .reverse()
             .findIndex((item) => item.step === step && item.state === 'running')
           if (reverseIdx >= 0) {
             const real = assistant.steps.length - 1 - reverseIdx
-            assistant.steps[real] = { step, state: 'done', detail }
+            assistant.steps[real] = { step, label: label || assistant.steps[real].label, state: 'done', detail }
           } else {
-            assistant.steps.push({ step, state: 'done', detail })
+            assistant.steps.push({ step, label, state: 'done', detail })
           }
         }
       } else if (event.event === 'text') {
@@ -447,6 +450,10 @@ async function send(preset?: string) {
     currentAbort.value = null
     clearTimeout(thinkingIdleTimer)
     assistant.streaming = false
+    // 收尾兜底:中断/出错时把仍"进行中"的步骤标记完成,避免 mini-spinner 永转
+    assistant.steps.forEach((item) => {
+      if (item.state === 'running') item.state = 'done'
+    })
     sending.value = false
     scrollBottom()
   }
@@ -495,6 +502,7 @@ function stopGeneration() {
                 >✦ 正在分析这顿饭的安排</span>
               </div>
 
+              <!-- 思索步骤只在流式期间展示,回答完成后全部路由隐藏 -->
               <ol v-if="bubble.streaming && bubble.steps.length" class="tool-steps">
                 <li
                   v-for="(stepItem, index) in bubble.steps"
@@ -503,11 +511,11 @@ function stopGeneration() {
                 >
                   <template v-if="stepItem.state === 'running'">
                     <span class="mini-spinner"></span>
-                    <span class="running-label">{{ stepLabel(stepItem.step) }}…</span>
+                    <span class="running-label">{{ stepLabel(stepItem) }}…</span>
                   </template>
                   <template v-else>
                     <span class="step-check"><el-icon><Check /></el-icon></span>
-                    <span class="step-name">{{ stepLabel(stepItem.step) }}</span>
+                    <span class="step-name">{{ stepLabel(stepItem) }}</span>
                     <small v-if="stepItem.detail" class="step-detail">{{ stepItem.detail }}</small>
                   </template>
                 </li>

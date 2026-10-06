@@ -1,11 +1,14 @@
 """对话编排服务:意图路由、约束前置、点名菜冲突检测、流式事件生成。
 
-事件协议(docs/V2改造方案 §8.1):thinking → status(真实工具轨迹) → text → plan → questions → done。
-无云端模型时降级:无 thinking 事件,正文一次性输出;工具步骤照常直播。
+事件协议(docs/V2改造方案 §8.1,按当前路由实际发送):
+status(真实工具步骤,动态步骤名 label) / thinking(合成或模型思维链) / text / candidates 交错产出 → done。
+plan/questions 事件为规划模式预留,当前路由不发送。
+无云端模型时降级:无模型 thinking,正文回退规则文本;status 步骤照常直播。
 """
 
 import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -14,7 +17,7 @@ from typing import AsyncIterator
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.db.models import AgentChatMessage, AgentChatSession, AgentRun
+from app.db.models import AgentChatMessage, AgentChatSession, AgentRun, Ingredient
 from app.db.session import SessionLocal
 from app.llm.factory import build_llm_provider
 from app.schemas.agent import AgentRunView, MenuOption, PlanningConstraints
@@ -28,8 +31,7 @@ from app.services.context_loader import (
     load_planning_context,
 )
 
-# 工具步骤直播节奏:每条 status 事件间隔(秒),让"进行中→完成"可感知
-STEP_PACING = 0.35
+logger = logging.getLogger(__name__)
 
 CONFIRM_KEYWORDS = ("确认", "发布", "就做这套", "做这套", "就这套", "按这套")
 MODIFY_KEYWORDS = ("换成", "改成", "换掉", "去掉", "再加一个", "换一个")
@@ -70,6 +72,8 @@ QA_PROMPT = (
     "请允许使用你的通用知识，用简体中文给出准确、简洁、可执行的回答。"
     "可以说明保存方法、挑选方式、常见做法、营养特点、食材替代和注意事项。"
     "不要编造用户的冰箱库存、家庭成员档案或实时数据；没有实时工具时不要假装知道天气。"
+    "如果用户想让你基于冰箱/库存出菜或安排饮食，而你拿不到库存数据，"
+    "不要说「没有权限」或拒绝，请自然地引导他发送「看看冰箱里有什么」来触发库存推荐。"
     "\n\n[菜名标注规则]只要回复中出现具体菜名（例如推荐了菜品、列举了某道菜的做法），"
     "就必须在回复的最后一行单独输出<dishes>菜名1|菜名2</dishes>，最多3个菜名，用|分隔，"
     "例如:<dishes>番茄炒蛋|青椒肉丝</dishes>。整条回复没有具体菜名时才允许省略此行。"
@@ -236,8 +240,11 @@ def _is_direct_recipe_request(text: str, intent: _Intent) -> bool:
 
 def _dish_name_from_text(text: str) -> str:
     cleaned = text.strip()
-    cleaned = re.sub(r"^(我想吃|我想做|我想要|想吃|想做|要做|做个|做一道|来个|来一份)\s*", "", cleaned)
+    cleaned = re.sub(r"^(我想吃|我想做|我想要|想吃|想吃点|想做|要做|做个|做一道|来个|来一份)\s*", "", cleaned)
     cleaned = re.sub(r"(怎么做|做法|的做法|给我做法).*?$", "", cleaned).strip(" ，,。！？?!")
+    # 再过一遍通用清洗:剥时间状语/语气词等(「明天想吃黄焖鸡」→「黄焖鸡」),
+    # 下厨房搜索等对外展示只应出现干净的关键词
+    cleaned = _extract_food_query(cleaned)
     return cleaned or "这道菜"
 
 
@@ -358,11 +365,18 @@ def _recall_recipes_by_ingredient(
 
 
 def _looks_like_inventory_menu(text: str) -> bool:
-    """冰箱/库存 + 要菜单/能做什么类诉求 → 库存驱动菜单分支(Agent 自读冰箱)。"""
+    """冰箱/库存 + 要菜单/能做什么类诉求 → 库存驱动菜单分支(Agent 自读冰箱)。
+
+    「根据冰箱现有食材吧」这类省略句式(无显式动词)也要命中,否则落到问答
+    路由,模型会回答"没有权限看冰箱"(实测踩过的坑)。
+    """
     has_source = "冰箱" in text or "库存" in text
     wants_menu = any(
         term in text
-        for term in ("菜单", "什么菜", "能做", "做菜", "做饭", "做什么", "吃什么", "吃", "推荐", "生成", "选", "临期", "适合", "安排")
+        for term in (
+            "菜单", "什么菜", "能做", "做菜", "做饭", "做什么", "吃什么", "吃",
+            "推荐", "生成", "选", "临期", "适合", "安排", "现有食材", "有什么食材", "食材",
+        )
     )
     return has_source and wants_menu
 
@@ -701,6 +715,126 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _status(step: str, label: str, state: str, detail: str = "") -> str:
+    """工具步骤直播事件。label 是按本次调用动态生成的步骤名,前端直接显示;
+    detail 在 done 时用人话给出真实结果(引用食材/成员/数量)。"""
+    return _sse("status", {"step": step, "label": label, "state": state, "detail": detail})
+
+
+# 路由判定后的"理解需求"完成说明,按最终路由给用户能读懂的措辞
+_ROUTE_SUMMARY = {
+    "kitchen_inventory": "想根据冰箱库存推荐菜谱",
+    "kitchen_recipe": "想学做一道菜,先查本地菜谱库",
+    "kitchen_qa": "厨房知识问答,直接回答",
+    "general": "日常闲聊,直接回答",
+}
+
+
+def _filter_constraints(
+    constraints: list[MemberConstraint], diners_user_ids: list[str] | None
+) -> list[MemberConstraint]:
+    """按本次勾选的用餐成员过滤生效约束;未勾选视为全员在座。"""
+    if not diners_user_ids:
+        return constraints
+    selected = set(diners_user_ids)
+    return [constraint for constraint in constraints if constraint.user_id in selected]
+
+
+def _constraints_detail(context: PlanningContext) -> str:
+    """"检查用餐限制"步骤的完成说明,引用本次用餐成员的真实约束。"""
+    summaries = [constraint.summary for constraint in context.member_constraints]
+    if not summaries:
+        return "本次用餐成员无忌口与过敏限制"
+    preview = "；".join(summaries[:4])
+    if len(summaries) > 4:
+        preview += f" 等 {len(summaries)} 条"
+    return preview
+
+
+def _load_context_optional(payload: ChatStreamRequest) -> PlanningContext | None:
+    """问答/闲聊分支用的优雅上下文加载:拿不到家庭档案就返回 None,不阻断回答。"""
+    try:
+        with SessionLocal() as session:
+            context = load_planning_context(
+                session,
+                payload.workspace_id,
+                payload.site_id,
+                payload.meal_service_id,
+            )
+    except ScopeNotFoundError:
+        return None
+    context.member_constraints = _filter_constraints(
+        context.member_constraints, payload.diners_user_ids
+    )
+    return context
+
+
+def _constraint_prompt_section(context: PlanningContext | None) -> str:
+    """把本次用餐成员的忌口/特殊状态注入系统提示,并要求模型主动提醒。"""
+    if context is None or not context.member_constraints:
+        return ""
+    lines = "；".join(constraint.summary for constraint in context.member_constraints)
+    return (
+        f"\n\n[本次用餐成员忌口与特殊状态]{lines}\n"
+        "回答涉及上述食材或口味时,必须明确提醒对应成员并给出少放/替换/分装建议,这是硬性要求;"
+        "提醒时写明成员与忌口内容。"
+    )
+
+
+def _ingredient_display_names(context: PlanningContext) -> dict[str, str]:
+    """食材 key → 中文名。优先全局食材字典,补充冰箱库存与库内菜配料。"""
+    names: dict[str, str] = {}
+    with SessionLocal() as session:
+        for row in session.scalars(select(Ingredient)):
+            names.setdefault(row.key, row.name)
+    for line in context.inventory:
+        names.setdefault(line.key, line.name)
+    for recipe in context.recipes:
+        for line in recipe.ingredients:
+            names.setdefault(line.key, line.name)
+    return names
+
+
+def _constraint_warnings_for_text(
+    text: str, context: PlanningContext, recipe_answer: bool
+) -> list[str]:
+    """确定性兜底:扫描最终回答文本,生成必须随回答展示的忌口/特殊事件提示行。
+
+    不依赖模型自觉;每行引用约束摘要(含成员名),满足"警示必须引用具体成员与事件"的契约红线。
+    recipe_answer 表示本回答属于菜品推荐/做法类(事件口味提醒只在这类回答附给)。
+    """
+    warnings: list[str] = []
+    name_by_key = _ingredient_display_names(context)
+    for constraint in context.member_constraints:
+        if constraint.kind == "restriction" and constraint.ingredient_key:
+            display = name_by_key.get(constraint.ingredient_key) or constraint.ingredient_key
+            if display not in text:
+                continue
+            if constraint.level == "forbidden":
+                warnings.append(
+                    f"⛔ {constraint.summary}：以上内容涉及「{display}」，这是过敏红线，请务必回避或彻底替换。"
+                )
+            else:
+                warnings.append(
+                    f"⚠ {constraint.summary}：以上内容涉及「{display}」，给这位成员食用时请少放、替换或单独分装。"
+                )
+        elif constraint.kind == "event" and recipe_answer:
+            tags = "、".join(constraint.avoid_tags)
+            warnings.append(
+                f"⚠ {constraint.summary}：烹调时请注意避开{tags}口味，可按成员分装调味。"
+                if tags
+                else f"⚠ {constraint.summary}：请按成员情况调整口味。"
+            )
+    return warnings
+
+
+def _format_warning_block(warnings: list[str]) -> str:
+    """把警示行拼成追加到回答末尾的 Markdown 块;无警示返回空串。"""
+    if not warnings:
+        return ""
+    return "\n\n**忌口与状态提示**\n" + "\n".join(f"- {w}" for w in warnings)
+
+
 _DISH_TAG_OPEN = "<dishes>"
 _DISH_TAG_CLOSE = "</dishes>"
 
@@ -725,6 +859,8 @@ class _DishTagFilter:
             for sep in (":", "："):
                 if sep in part:
                     part = part.rsplit(sep, 1)[1].strip()
+            # 模型偶尔把整句话当菜名(「明天想吃黄焖鸡」),统一清洗成关键词再入库
+            part = _extract_food_query(part)
             if part:
                 self.dishes.append(part)
             if len(self.dishes) >= 3:
@@ -792,7 +928,11 @@ class _DishTagFilter:
 async def _llm_stream_text(
     prompt_messages: list[dict],
 ) -> AsyncIterator[tuple[str, str]]:
-    """有云端模型时,流式产出 ("thinking"|"text", 增量)。失败时静默回退规则文本。"""
+    """有云端模型时,流式产出 ("thinking"|"text", 增量)。
+
+    失败时记录日志并产出 "__error__" 标记(调用方按约定忽略该 kind),
+    随后由调用方回退规则文本,不再无声吞错。
+    """
     provider = build_llm_provider(get_settings())
     if provider is None:
         return
@@ -801,6 +941,7 @@ async def _llm_stream_text(
             if delta:
                 yield kind, delta
     except Exception:
+        logger.exception("chat LLM 流式调用失败,将回退规则文本")
         yield "__error__", ""
 
 
@@ -851,6 +992,8 @@ def _recent_history_messages(
 async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
     settings = get_settings()
     current_user_message_id: str | None = None
+    # 开场立即直播第一步,消除"首字节前纯转圈"的黑盒窗口
+    yield _status("session", "准备会话", "running")
     with SessionLocal() as session:
         if payload.session_id:
             chat_session = session.get(AgentChatSession, payload.session_id)
@@ -871,8 +1014,10 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         session.flush()
         current_user_message_id = current_user_message.id
         session.commit()
+    yield _status("session", "准备会话", "done", "会话就绪,已收到消息")
 
     user_text = _message_without_frontend_context(payload.message)
+    yield _status("parse_request", "理解需求", "running")
     route = await _route_message(user_text)
     if _fallback_route(user_text) == "kitchen_recipe" or (
         any(term in user_text for term in ("怎么做", "做法"))
@@ -893,8 +1038,13 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             )
             else "kitchen_qa"
         )
+    yield _status(
+        "parse_request", "理解需求", "done", _ROUTE_SUMMARY.get(route, "厨房对话")
+    )
     if route == "general":
-        # 普通话题不读取厨房上下文,不创建规划运行,也不发送 thinking/status/plan。
+        # 普通话题不读取厨房上下文,不创建规划运行,也不发送 thinking/plan。
+        yield _status("compose_reply", "组织回答", "running")
+        fallback_used = False
         text_parts: list[str] = []
         dish_filter = _DishTagFilter()
         async for kind, delta in _llm_stream_text(
@@ -915,10 +1065,27 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             text_parts.append(tail)
             yield _sse("text", {"delta": tail})
         if not text_parts:
+            fallback_used = True
             text_parts = [_fallback_general_text(user_text)]
             yield _sse("text", {"delta": text_parts[0]})
+        yield _status(
+            "compose_reply",
+            "组织回答",
+            "done",
+            "模型暂不可用,已按规则文本回答" if fallback_used else "",
+        )
 
         full_text = "".join(text_parts).rstrip()
+        if dish_filter.dishes:
+            # 闲聊里混入了菜品推荐:同样补忌口兜底,保证"生成食谱的回答"无死角
+            general_context = _load_context_optional(payload)
+            if general_context is not None:
+                warning_block = _format_warning_block(
+                    _constraint_warnings_for_text(full_text, general_context, True)
+                )
+                if warning_block:
+                    yield _sse("text", {"delta": warning_block})
+                    full_text += warning_block
         message_id = None
         with SessionLocal() as session:
             message = AgentChatMessage(
@@ -946,12 +1113,31 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         return
 
     if route == "kitchen_qa":
-        # 知识问答不读取冰箱/家庭档案,不创建规划运行,也不发送 thinking/status/plan。
+        # 知识问答不读冰箱库存、不创建规划运行,但用餐成员的忌口/特殊状态必须生效:
+        # 注入系统提示 + 回答后确定性兜底警示,不依赖模型自觉。
+        fallback_used = False
         text_parts: list[str] = []
         dish_filter = _DishTagFilter()
+        qa_context = _load_context_optional(payload)
+        yield _status("get_member_constraints", "检查用餐限制", "running")
+        if qa_context is None:
+            yield _status(
+                "get_member_constraints",
+                "检查用餐限制",
+                "done",
+                "家庭档案不可用,跳过用餐限制检查",
+            )
+        else:
+            yield _status(
+                "get_member_constraints", "检查用餐限制", "done", _constraints_detail(qa_context)
+            )
+        yield _status("compose_reply", "组织回答", "running")
         async for kind, delta in _llm_stream_text(
             [
-                {"role": "system", "content": QA_PROMPT},
+                {
+                    "role": "system",
+                    "content": QA_PROMPT + _constraint_prompt_section(qa_context),
+                },
                 *_recent_history_messages(session_id, current_user_message_id),
                 {"role": "user", "content": user_text},
                 {"role": "system", "content": _DISH_TAG_REMINDER},
@@ -967,10 +1153,24 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             text_parts.append(tail)
             yield _sse("text", {"delta": tail})
         if not text_parts:
+            fallback_used = True
             text_parts = [_fallback_qa_text(user_text)]
             yield _sse("text", {"delta": text_parts[0]})
+        yield _status(
+            "compose_reply",
+            "组织回答",
+            "done",
+            "模型暂不可用,已按规则文本回答" if fallback_used else "",
+        )
 
         full_text = "".join(text_parts).rstrip()
+        if qa_context is not None:
+            warning_block = _format_warning_block(
+                _constraint_warnings_for_text(full_text, qa_context, bool(dish_filter.dishes))
+            )
+            if warning_block:
+                yield _sse("text", {"delta": warning_block})
+                full_text += warning_block
         message_id = None
         with SessionLocal() as session:
             message = AgentChatMessage(
@@ -997,6 +1197,8 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         )
         return
 
+    yield _status("get_member_constraints", "检查用餐限制", "running")
+    yield _status("list_inventory", "调取冰箱", "running")
     try:
         with SessionLocal() as session:
             context = load_planning_context(
@@ -1010,12 +1212,74 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         yield _sse("done", {"session_id": session_id, "message_id": None})
         return
 
+    # 忌口/特殊事件一律只看本次用餐成员;后续 _conflict_for、prompt、步骤 detail 全部基于过滤后的约束
+    context.member_constraints = _filter_constraints(
+        context.member_constraints, payload.diners_user_ids
+    )
+    in_stock_names = [line.name for line in context.inventory if line.quantity > 0]
+    inventory_preview = "、".join(in_stock_names[:6])
+    yield _status(
+        "list_inventory",
+        "调取冰箱",
+        "done",
+        (
+            f"冰箱现有 {inventory_preview}"
+            + (" 等" if len(in_stock_names) > 6 else "")
+            + f" 共 {len(in_stock_names)} 种食材"
+            if in_stock_names
+            else "冰箱是空的,先补点货"
+        ),
+    )
+    yield _status("get_member_constraints", "检查用餐限制", "done", _constraints_detail(context))
+
     latest_run_id = _latest_run_id(payload.workspace_id)
+    yield _status("search_recipe_candidates", "调取本地菜谱库", "running")
     intent = _detect_intent(user_text, context, has_previous_run=bool(latest_run_id))
+    if intent.named_recipes:
+        yield _status(
+            "search_recipe_candidates",
+            "调取本地菜谱库",
+            "done",
+            f"本地库命中『{intent.named_recipes[0].name}』",
+        )
+    elif route == "kitchen_inventory":
+        yield _status(
+            "search_recipe_candidates",
+            "调取本地菜谱库",
+            "done",
+            "未点名具体菜,直接按冰箱库存匹配",
+        )
+    else:
+        yield _status(
+            "search_recipe_candidates",
+            "调取本地菜谱库",
+            "done",
+            "本地库无直接命中,按食材模糊匹配",
+        )
 
     if route == "kitchen_inventory":
         # 库存菜单:纯规则生成(不依赖 LLM),临期优先;忌口只标注不过滤
+        yield _status("search_recipe_candidates", "按现有食材匹配菜谱", "running")
+        yield _status("filter_hard_constraints", "核对忌口与过敏原", "running")
         menu_items, menu_total = _build_inventory_menu(context)
+        yield _status(
+            "search_recipe_candidates",
+            "按现有食材匹配菜谱",
+            "done",
+            f"与冰箱食材匹配到 {menu_total} 道"
+            + (f",先展示最相关的 {len(menu_items)} 道" if menu_total > len(menu_items) else ""),
+        )
+        conflict_flagged = sum(1 for item in menu_items if item.get("conflict_level"))
+        yield _status(
+            "filter_hard_constraints",
+            "核对忌口与过敏原",
+            "done",
+            (
+                f"{conflict_flagged} 道菜有冲突,只标注不过滤,决定权在你"
+                if conflict_flagged
+                else "候选菜无忌口/过敏冲突,可以放心选"
+            ),
+        )
         if menu_items:
             today = date.today()
             expiring_names = sorted(
@@ -1084,8 +1348,15 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         if recipe is None:
             # 食材模糊查询:核心词命中配料(如「想吃虾」) → 发候选菜列表,由前端点击展开做法
             fuzzy_query = _extract_food_query(user_text)
+            yield _status("search_recipe_candidates", "按食材模糊匹配", "running")
             fuzzy_items, fuzzy_total = _recall_recipes_by_ingredient(fuzzy_query, context)
             if fuzzy_items:
+                yield _status(
+                    "search_recipe_candidates",
+                    "按食材模糊匹配",
+                    "done",
+                    f"以「{fuzzy_query}」与 {len(context.recipes)} 道库内菜配料双向匹配,命中 {fuzzy_total} 道",
+                )
                 # 合成思考过程:把真实的规则执行步骤讲给用户(本地计算,不做人为延迟)
                 for chunk in (
                     f"【理解需求】从你的话里提取想吃的食材：「{fuzzy_query}」",
@@ -1127,9 +1398,16 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                     },
                 )
                 return
+            yield _status(
+                "search_recipe_candidates",
+                "按食材模糊匹配",
+                "done",
+                f"库内没有含「{fuzzy_query}」的菜,改用通用做法生成",
+            )
             dish_name = _dish_name_from_text(user_text)
             text_parts: list[str] = []
             thinking_parts: list[str] = []
+            yield _status("compose_reply", "生成做法", "running")
             async for kind, delta in _llm_stream_text(
                 [
                     {"role": "system", "content": _generic_recipe_prompt(dish_name, context)},
@@ -1144,8 +1422,20 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                     text_parts.append(delta)
                     yield _sse("text", {"delta": delta})
             full_text = "".join(text_parts) or _fallback_generic_recipe_text(dish_name)
+            yield _status(
+                "compose_reply",
+                "生成做法",
+                "done",
+                "" if text_parts else "模型暂不可用,已按规则文本回答",
+            )
             if not text_parts:
                 yield _sse("text", {"delta": full_text})
+            warning_block = _format_warning_block(
+                _constraint_warnings_for_text(full_text, context, True)
+            )
+            if warning_block:
+                yield _sse("text", {"delta": warning_block})
+                full_text += warning_block
             with SessionLocal() as session:
                 message = AgentChatMessage(
                     session_id=session_id,
@@ -1172,10 +1462,17 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             conflict = _conflict_for(recipe, context)
             text_parts: list[str] = []
             thinking_parts: list[str] = []
+            yield _status("compose_reply", "生成做法", "running")
             if conflict is not None and conflict[1] == "forbidden":
                 full_text = (
                     f"这道{recipe.name}包含{conflict[0].summary}涉及的过敏原，"
                     "为了安全起见，我不能给出会使用该食材的做法。可以换一道不含该过敏原的菜。"
+                )
+                yield _status(
+                    "compose_reply",
+                    "生成做法",
+                    "done",
+                    f"『{recipe.name}』含过敏红线食材,不给做法,建议换菜",
                 )
                 yield _sse("text", {"delta": full_text})
             else:
@@ -1201,9 +1498,20 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                     ]
                     if dislike_constraints:
                         full_text += "\n\n**忌口调整建议**：" + "；".join(dislike_constraints) + "。相关食材建议少放、替换或单独分装。"
+                    yield _status(
+                        "compose_reply", "生成做法", "done", "模型暂不可用,已按规则文本回答"
+                    )
                     yield _sse("text", {"delta": full_text})
                 else:
                     full_text = "".join(text_parts)
+                    yield _status("compose_reply", "生成做法", "done")
+                # 忌口兜底:模型没提也要提示;过敏红线拒答路径已自带说明,不重复
+                warning_block = _format_warning_block(
+                    _constraint_warnings_for_text(full_text, context, True)
+                )
+                if warning_block:
+                    yield _sse("text", {"delta": warning_block})
+                    full_text += warning_block
             message_id = None
             with SessionLocal() as session:
                 message = AgentChatMessage(
