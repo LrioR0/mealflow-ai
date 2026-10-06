@@ -13,26 +13,6 @@ export interface ProcurementItem {
   createdAt?: number
 }
 
-const STORAGE_KEY = 'mealflow_procurement_v1'
-
-export function readProcurement(): ProcurementItem[] {
-  try {
-    const data: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]')
-    if (!Array.isArray(data)) return []
-    return data.filter((item): item is ProcurementItem =>
-      item && typeof item.id === 'string' && typeof item.ingredient === 'string' &&
-      typeof item.quantity === 'string' && typeof item.unit === 'string' &&
-      typeof item.checked === 'boolean' && ['agent', 'manual'].includes(item.source),
-    )
-  } catch {
-    return []
-  }
-}
-
-export function saveProcurement(items: ProcurementItem[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
-}
-
 export function fetchProcurement(workspaceId = 'home-workspace'): Promise<ProcurementItem[]> {
   return apiRequest<Array<ProcurementItem & { source_id?: string | null }>>(
     `/workspaces/${workspaceId}/procurement-items`,

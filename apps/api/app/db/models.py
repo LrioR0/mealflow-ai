@@ -285,4 +285,6 @@ class CookingRecord(TimestampMixin, Base):
     steps: Mapped[list[dict]] = mapped_column(JSON, default=list)
     rating: Mapped[float] = mapped_column(Numeric(3, 1), default=5)
     next_time_note: Mapped[str] = mapped_column(Text, default="")
+    image: Mapped[str] = mapped_column(Text, default="")
+    reviews: Mapped[list[dict]] = mapped_column(JSON, default=list)
 

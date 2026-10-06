@@ -6,7 +6,6 @@ import {
   createProcurementItem,
   deleteProcurementItem,
   fetchProcurement,
-  readProcurement,
   type ProcurementItem,
   updateProcurementItem,
 } from '../../composables/procurement'
@@ -28,27 +27,9 @@ async function load() {
   try {
     const remote = await fetchProcurement()
     items.value = remote
-    if (!remote.length) await migrateLocalItems()
   } catch {
     ElMessage.error('采购清单加载失败，请检查后端连接')
   }
-}
-
-async function migrateLocalItems() {
-  const localItems = readProcurement()
-  if (!localItems.length) return
-  for (const item of localItems) {
-    await createProcurementItem({
-      ingredient: item.ingredient,
-      quantity: item.quantity,
-      unit: item.unit,
-      checked: item.checked,
-      source: item.source,
-      sourceId: item.sourceId,
-    })
-  }
-  items.value = await fetchProcurement()
-  ElMessage.success('已将本机采购清单同步到家庭共享清单')
 }
 
 onMounted(() => void load())

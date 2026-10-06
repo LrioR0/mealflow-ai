@@ -72,7 +72,6 @@ interface RecordDraft {
   nextTimeNote: string
 }
 
-const STORAGE_KEY = 'mealflow_cooking_history_v1'
 const records = ref<CookingRecord[]>([])
 const searchText = ref('')
 const activeTag = ref('全部')
@@ -124,64 +123,10 @@ function placeholder(title: string, from: string, to: string) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`
 }
 
-function seedRecords(): CookingRecord[] {
-  return [
-    {
-      id: uid(),
-      image: placeholder('番茄牛腩', '#8d3c2b', '#d6934f'),
-      dishName: '番茄牛腩',
-      cook: 'Colin',
-      cookedAt: '2026-10-05T18:30',
-      servings: 3,
-      durationMinutes: 75,
-      difficulty: '进阶',
-      tags: ['周末下厨', '暖胃', '第一次尝试'],
-      ingredients: '牛腩 600g、番茄 4 个、土豆 2 个、洋葱半个、生姜 4 片',
-      story: '降温后的第一锅炖菜。比预想中更成功，汤汁拿来拌饭尤其好吃。',
-      steps: [
-        { id: uid(), title: '处理牛腩', detail: '冷水浸泡后切块，焯水洗净浮沫。', minutes: 15 },
-        { id: uid(), title: '炒出底味', detail: '洋葱和姜片炒香，下牛腩翻炒至表面微焦。', minutes: 10 },
-        { id: uid(), title: '小火慢炖', detail: '加入番茄和热水，小火炖 45 分钟，再下土豆。', minutes: 50 },
-      ],
-      rating: 4.5,
-      nextTimeNote: '番茄可以再多一个，盐最后五分钟再放。',
-      reviews: [
-        { id: uid(), nickname: '家人', rating: 5, content: '汤很浓，牛肉也软，下次还想吃。', createdAt: '2026-10-05T20:10:00' },
-      ],
-      createdAt: '2026-10-05T20:00:00',
-    },
-    {
-      id: uid(),
-      image: placeholder('葱油拌面', '#1e6658', '#b9a55d'),
-      dishName: '葱油拌面',
-      cook: 'Lrio',
-      cookedAt: '2026-10-03T12:10',
-      servings: 2,
-      durationMinutes: 20,
-      difficulty: '快手',
-      tags: ['工作日', '面食', '快手'],
-      ingredients: '细面 250g、小葱 1 把、生抽 3 勺、老抽 1 勺、白糖半勺',
-      story: '二十分钟解决午饭，葱油一次多熬一点可以冷藏。',
-      steps: [
-        { id: uid(), title: '熬葱油', detail: '小葱沥干水分，小火炸至焦黄。', minutes: 12 },
-        { id: uid(), title: '煮面拌匀', detail: '面条煮熟沥水，趁热加入葱油酱汁。', minutes: 8 },
-      ],
-      rating: 4,
-      nextTimeNote: '糖可以再少一点，补一颗溏心蛋。',
-      reviews: [],
-      createdAt: '2026-10-03T12:40:00',
-    },
-  ]
-}
-
-function save() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(records.value))
-}
-
 function fromApi(record: CookingRecordPayload): CookingRecord {
   return {
     id: record.id ?? uid(),
-    image: placeholder(record.dish_name, '#315d54', '#c69b53'),
+    image: record.image || placeholder(record.dish_name, '#315d54', '#c69b53'),
     dishName: record.dish_name,
     cook: record.cook,
     cookedAt: record.cooked_at,
@@ -194,7 +139,7 @@ function fromApi(record: CookingRecordPayload): CookingRecord {
     steps: (record.steps ?? []).map((step) => ({ ...step, id: uid() })),
     rating: record.rating,
     nextTimeNote: record.next_time_note,
-    reviews: [],
+    reviews: record.reviews ?? [],
     createdAt: new Date().toISOString(),
   }
 }
@@ -214,31 +159,19 @@ function toApi(record: CookingRecord | RecordDraft): CookingRecordPayload {
     steps: record.steps.map(({ title, detail, minutes }) => ({ title, detail, minutes })),
     rating: record.rating,
     next_time_note: record.nextTimeNote,
+    image: record.image,
+    reviews: 'reviews' in record ? record.reviews : [],
   }
 }
 
 async function load() {
   try {
     const remote = await fetchCookingRecords()
-    if (remote.length) {
-      records.value = remote.map(fromApi)
-      return
-    }
-    const cached = localStorage.getItem(STORAGE_KEY)
-    const localRecords: CookingRecord[] = cached ? JSON.parse(cached) : seedRecords()
-    records.value = localRecords
-    for (const record of localRecords) {
-      await createCookingRecord(toApi(record))
-    }
+    records.value = remote.map(fromApi)
   } catch {
-    try {
-      const cached = localStorage.getItem(STORAGE_KEY)
-      records.value = cached ? JSON.parse(cached) : seedRecords()
-    } catch {
-      records.value = seedRecords()
-    }
+    records.value = []
+    ElMessage.error('下厨足迹加载失败，请检查后端连接')
   }
-  save()
 }
 
 const allTags = computed(() => {
@@ -388,7 +321,6 @@ async function submitRecord() {
     const created = await createCookingRecord(toApi(record))
     records.value.unshift({ ...record, ...fromApi(created), image: record.image, reviews: record.reviews })
   }
-  save()
   dialogVisible.value = false
   ElMessage.success(existing ? '下厨记录已更新' : '这一餐已经收进下厨足迹')
 }
@@ -406,11 +338,10 @@ async function removeRecord(record: CookingRecord) {
   await deleteCookingRecord(record.id)
   records.value = records.value.filter((item) => item.id !== record.id)
   if (activeRecord.value?.id === record.id) detailVisible.value = false
-  save()
   ElMessage.success('记录已删除')
 }
 
-function submitReview() {
+async function submitReview() {
   if (!activeRecord.value) return
   if (!reviewForm.content.trim()) {
     ElMessage.warning('写一句评价再提交吧')
@@ -423,7 +354,12 @@ function submitReview() {
     content: reviewForm.content.trim(),
     createdAt: new Date().toISOString(),
   })
-  save()
+  try {
+    await updateCookingRecord(activeRecord.value.id, { reviews: activeRecord.value.reviews })
+  } catch {
+    ElMessage.error('评价同步失败，请检查后端连接')
+    return
+  }
   Object.assign(reviewForm, { nickname: '', rating: 5, content: '' })
   ElMessage.success('评价已留下，等账户功能上线后可自动关联身份')
 }
