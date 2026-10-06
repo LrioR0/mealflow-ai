@@ -33,6 +33,7 @@ const recipes = ref<Recipe[]>([])
 const loading = ref(true)
 const errorMessage = ref('')
 const activeTab = ref<'all' | 'ingredients'>('all')
+const ingredientsExpanded = ref(true)
 
 // ===== Tab1 菜谱大全 =====
 const keyword = ref('')
@@ -42,7 +43,7 @@ const heatRange = ref<[number, number]>([0, 9999])
 const heatSliderBounds = ref<[number, number]>([0, 9999])
 const sort = ref<SortKey>('default')
 const page1 = ref(1)
-const openSections = reactive({ difficulty: true, heat: true, sort: false })
+const openSections = reactive({ difficulty: true, heat: true })
 
 // ===== Tab2 按食材找菜 =====
 const selectedIngredients = ref<string[]>([])
@@ -181,6 +182,15 @@ function sendIngredientsToAgent() {
       >
         按食材找菜
       </button>
+      <button
+        v-if="activeTab === 'ingredients'"
+        type="button"
+        class="panel-toggle"
+        :aria-expanded="ingredientsExpanded"
+        @click="ingredientsExpanded = !ingredientsExpanded"
+      >
+        {{ ingredientsExpanded ? '收起筛选' : '展开食材筛选' }}
+      </button>
     </nav>
 
     <div v-if="loading" class="state-block">菜谱加载中…</div>
@@ -234,22 +244,11 @@ function sendIngredientsToAgent() {
           </div>
 
           <div class="filter-group">
-            <button type="button" class="filter-title toggle" @click="openSections.sort = !openSections.sort">
-              排序方式
-              <el-icon :class="{ open: openSections.sort }"><arrow-down /></el-icon>
-            </button>
-            <div v-show="openSections.sort" class="filter-content">
-              <div class="sort-list">
-                <button
-                  v-for="option in SORT_OPTIONS"
-                  :key="option.key"
-                  type="button"
-                  :class="{ active: sort === option.key }"
-                  @click="sort = option.key"
-                >
-                  {{ option.label }}
-                </button>
-              </div>
+            <div class="filter-title">排序方式</div>
+            <div class="filter-content">
+              <el-select v-model="sort" size="small" aria-label="排序方式" style="width: 100%">
+                <el-option v-for="option in SORT_OPTIONS" :key="option.key" :label="option.label" :value="option.key" />
+              </el-select>
             </div>
           </div>
 
@@ -258,7 +257,7 @@ function sendIngredientsToAgent() {
           </el-button>
         </aside>
 
-        <div class="result-area">
+        <div class="result-area result-area--with-toolbar">
           <div class="result-bar">
             <el-input
               v-model="keyword"
@@ -269,12 +268,15 @@ function sendIngredientsToAgent() {
             />
             <span class="result-count">共 {{ tab1Filtered.length }} 道</span>
           </div>
-          <div v-if="tab1Paged.length" class="card-grid">
-            <RecipeCard v-for="recipe in tab1Paged" :key="recipe.id" :recipe="recipe" @agent="sendRecipeToAgent" />
+          <div class="result-scroll">
+            <div v-if="tab1Paged.length" class="card-grid">
+              <RecipeCard v-for="recipe in tab1Paged" :key="recipe.id" :recipe="recipe" @agent="sendRecipeToAgent" />
+            </div>
+            <div v-else class="state-block">🍳 没有找到匹配的菜谱,试试减少筛选条件或换个关键词</div>
           </div>
-          <div v-else class="state-block">🍳 没有找到匹配的菜谱,试试减少筛选条件或换个关键词</div>
+        </div>
+        <div v-if="tab1Filtered.length > PAGE_SIZE" class="result-footer result-footer--external">
           <el-pagination
-            v-if="tab1Filtered.length > PAGE_SIZE"
             v-model:current-page="page1"
             class="pager"
             background
@@ -287,7 +289,7 @@ function sendIngredientsToAgent() {
 
       <!-- ===== Tab2 按食材找菜 ===== -->
       <div v-show="activeTab === 'ingredients'" class="tab2-layout">
-        <div class="pick-panel">
+        <div v-show="ingredientsExpanded" class="pick-panel">
           <div class="pick-section" v-for="group in INGREDIENT_GROUPS" :key="group.label">
             <div class="pick-title">{{ group.label }}</div>
             <el-checkbox-group v-model="selectedIngredients" class="inline-checks">
@@ -343,12 +345,15 @@ function sendIngredientsToAgent() {
         </div>
 
         <div class="result-area">
-          <div v-if="tab2Paged.length" class="card-grid">
-            <RecipeCard v-for="recipe in tab2Paged" :key="recipe.id" :recipe="recipe" @agent="sendRecipeToAgent" />
+          <div class="result-scroll">
+            <div v-if="tab2Paged.length" class="card-grid">
+              <RecipeCard v-for="recipe in tab2Paged" :key="recipe.id" :recipe="recipe" @agent="sendRecipeToAgent" />
+            </div>
+            <div v-else class="state-block">🍳 没有匹配的菜谱,多勾几种食材或换成模糊匹配试试</div>
           </div>
-          <div v-else class="state-block">🍳 没有匹配的菜谱,多勾几种食材或换成模糊匹配试试</div>
+        </div>
+        <div v-if="tab2Matched.length > PAGE_SIZE" class="result-footer result-footer--external">
           <el-pagination
-            v-if="tab2Matched.length > PAGE_SIZE"
             v-model:current-page="page2"
             class="pager"
             background
@@ -373,7 +378,7 @@ function sendIngredientsToAgent() {
   --el-color-primary-light-9: #e7f2ee;
   --el-color-primary-dark-2: #0c3d37;
   width: 100%;
-  max-width: 1250px;
+  max-width: 1480px;
   height: calc(100vh - 118px);
   min-height: 0;
   margin: 0 auto;
@@ -382,14 +387,23 @@ function sendIngredientsToAgent() {
   overflow: hidden;
 }
 
-.page-hero { display: flex; justify-content: space-between; align-items: flex-end; gap: 18px; }
-.page-hero h2 { margin: 4px 0 0; font-family: Georgia, 'Songti SC', serif; font-size: 25px; }
-.page-hero p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
-.data-note { color: var(--muted); font-size: 13px; }
+.page-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 0;
+  flex-shrink: 0;
+}
+.page-hero .eyebrow { display: inline-block; }
+.page-hero h2 { margin: 3px 0 4px; font-family: Georgia, 'Songti SC', serif; font-size: 34px; line-height: 1.1; }
+.page-hero p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.data-note { color: var(--muted); font-size: 13px; white-space: nowrap; padding-bottom: 3px; }
 
 .allergy-notice {
-  margin-top: 14px;
-  padding: 9px 14px;
+  flex-shrink: 0;
+  margin-top: 8px;
+  padding: 6px 10px;
   border: 1px solid #e0bd73;
   background: #fffaf0;
   border-radius: 10px;
@@ -398,51 +412,69 @@ function sendIngredientsToAgent() {
   line-height: 1.6;
 }
 
-.cookbook-tabs { display: flex; gap: 8px; margin: 14px 0 0; }
+.cookbook-tabs { display: flex; flex-shrink: 0; gap: 4px; margin: 8px 0 0; }
 .cookbook-tabs button {
-  padding: 8px 22px;
+  min-width: 112px;
+  padding: 7px 16px;
   border: 1px solid var(--border);
-  border-radius: 10px 10px 0 0;
-  border-bottom: 0;
-  background: rgba(255, 255, 255, 0.6);
+  border-radius: 999px;
+  background: #fff;
   color: var(--muted);
   font-size: 14px;
   font-weight: 600;
   transition: 0.16s ease;
 }
 .cookbook-tabs button.active {
-  background: #fff;
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+.cookbook-tabs .panel-toggle {
+  margin-left: auto;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 0;
+  background: transparent;
+  font-size: 12px;
   color: var(--green);
-  box-shadow: 0 -3px 10px rgba(33, 60, 54, 0.05);
 }
 
 .cookbook-body {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  border-top: 1px solid var(--border);
-  padding-top: 16px;
+  overflow: hidden;
+  padding-top: 8px;
 }
 
 /* ===== Tab1:左侧筛选 + 右侧结果 ===== */
 .tab-layout {
   display: grid;
-  grid-template-columns: 232px 1fr;
-  gap: 18px;
+  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) 36px;
+  gap: 6px 10px;
   align-items: start;
+  height: 100%;
+  min-height: 0;
 }
 .filter-panel {
-  position: sticky;
-  top: 0;
+  grid-row: 1;
+  grid-column: 1;
   display: grid;
-  gap: 12px;
-  padding: 14px;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  align-items: start;
+  height: 100%;
+  min-height: 0;
+  gap: 4px;
+  padding: 8px;
   background: #fff;
   border: 1px solid var(--border);
   border-radius: 14px;
+  box-shadow: 0 4px 18px rgba(33, 60, 54, 0.04);
+  overflow: visible;
 }
-.filter-group { border-bottom: 1px solid #eef0ec; padding-bottom: 12px; }
-.filter-group:last-of-type { border-bottom: 0; padding-bottom: 0; }
+.filter-group { min-width: 0; padding-bottom: 6px; border-bottom: 1px solid #eef0ec; }
+.filter-group:last-of-type { padding-bottom: 0; border-bottom: 0; }
 .filter-title {
   width: 100%;
   display: flex;
@@ -457,14 +489,14 @@ function sendIngredientsToAgent() {
 }
 .filter-title .el-icon { transition: transform 0.18s ease; color: var(--muted); }
 .filter-title .el-icon.open { transform: rotate(180deg); }
-.filter-content { margin-top: 10px; }
+.filter-content { margin-top: 4px; }
 
-.category-list { display: grid; gap: 4px; margin-top: 10px; }
+.category-list { display: grid; grid-template-columns: 1fr; gap: 2px; margin-top: 4px; }
 .category-list button {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 7px 10px;
+  padding: 3px 8px;
   border: 0;
   border-radius: 8px;
   background: none;
@@ -476,12 +508,14 @@ function sendIngredientsToAgent() {
 .category-list button.active { background: var(--green); color: #fff; font-weight: 650; }
 .category-list small { color: inherit; opacity: 0.62; font-variant-numeric: tabular-nums; }
 
-.inline-checks { display: flex; flex-wrap: wrap; gap: 6px; }
+.inline-checks { display: flex; flex-wrap: wrap; gap: 4px; }
 .inline-checks :deep(.el-checkbox) { margin-right: 0; --el-checkbox-checked-bg-color: var(--green); --el-checkbox-checked-input-border-color: var(--green); }
-.inline-checks :deep(.el-checkbox.el-checkbox--border) { padding: 4px 9px; border-radius: 8px; height: auto; }
-.inline-checks :deep(.el-checkbox__label) { font-size: 12.5px; padding-left: 6px; }
+.inline-checks :deep(.el-checkbox.el-checkbox--border) { padding: 2px 6px; border-radius: 6px; height: 24px; }
+.inline-checks :deep(.el-checkbox__label) { font-size: 11px; padding-left: 4px; }
+.filter-panel .inline-checks { flex-wrap: nowrap; }
+.filter-panel :deep(.el-slider) { height: 24px; margin: 0 5px; width: calc(100% - 10px); }
 
-.heat-value { margin: 8px 0 0; color: var(--muted); font-size: 12px; text-align: center; }
+.heat-value { margin: 2px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
 
 .sort-list { display: grid; gap: 4px; }
 .sort-list button {
@@ -497,19 +531,72 @@ function sendIngredientsToAgent() {
 .sort-list button:hover { background: #f1f5f1; }
 .sort-list button.active { background: #e7f2ee; border-color: var(--green-2); color: var(--green); font-weight: 650; }
 
-.reset-btn { width: 100%; }
+.reset-btn { width: 100%; align-self: end; }
+.filter-panel .reset-btn { min-height: 28px; height: 28px; }
 
 /* ===== 结果区 ===== */
-.result-area { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
-.result-bar { display: flex; align-items: center; gap: 12px; }
-.search-input { width: 320px; }
+.result-area {
+  grid-row: 1;
+  grid-column: 2;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.result-area--with-toolbar {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.result-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 0 6px;
+  background: #f6f5ef;
+  border-bottom: 1px solid #e4e7e2;
+}
+.result-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 4px 4px 0;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.result-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding-top: 0;
+  background: #f6f5ef;
+  border-top: 1px solid #e4e7e2;
+}
+.result-footer--external {
+  grid-column: 2;
+  grid-row: 2;
+  justify-content: flex-end;
+  padding: 0;
+  background: transparent;
+  border-top: 0;
+}
+.search-input { width: min(360px, 58%); }
 .result-count { color: var(--muted); font-size: 13px; }
+.result-bar--summary { justify-content: space-between; }
+.result-heading { color: var(--ink); font-size: 14px; }
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(288px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+  align-items: stretch;
 }
-.pager { justify-content: center; }
+.card-grid :deep(.recipe-card) { padding: 9px; gap: 4px; }
+.card-grid :deep(.card-topline h3) { font-size: 14px; }
+.card-grid :deep(.card-ingredients) { font-size: 12px; line-height: 1.5; }
+.card-grid :deep(.card-actions) { gap: 4px; padding-top: 0; }
+.card-grid :deep(.card-actions .el-button) { margin-left: 0; min-height: 28px; height: 28px; font-size: 11px; padding: 0 6px; }
+.pager { justify-content: flex-end; }
 
 .state-block {
   padding: 46px 20px;
@@ -522,24 +609,43 @@ function sendIngredientsToAgent() {
 .state-block.error { color: #a43c36; border-color: #dfb2ae; }
 
 /* ===== Tab2:食材/厨具/模式面板 ===== */
-.tab2-layout { display: grid; grid-template-columns: 1fr; gap: 16px; }
-.pick-panel {
+.tab2-layout {
   display: grid;
-  gap: 16px;
-  padding: 16px 18px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  row-gap: 6px;
+  align-items: start;
+  height: 100%;
+  min-height: 0;
+}
+.pick-panel {
+  grid-row: 1;
+  grid-column: 1;
+  display: grid;
+  grid-template-columns: 1.5fr 1fr 1fr;
+  align-items: start;
+  gap: 8px 12px;
+  height: 210px;
+  padding: 10px 12px;
+  overflow: visible;
   background: #fff;
   border: 1px solid var(--border);
   border-radius: 14px;
+  box-shadow: 0 4px 18px rgba(33, 60, 54, 0.04);
 }
-.pick-title { font-size: 13px; font-weight: 700; margin-bottom: 9px; }
-.pick-hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+.tab2-layout > .result-area { grid-column: 1; grid-row: 2; }
+.tab2-layout > .result-footer { grid-column: 1; grid-row: 3; }
+.pick-section { min-width: 0; }
+.pick-section + .pick-section { padding-top: 0; border-top: 0; }
+.pick-title { font-size: 12px; font-weight: 700; margin-bottom: 4px; }
+.pick-hint { margin: 4px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.3; }
 
-.mode-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.mode-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
 .mode-card {
   position: relative;
   display: grid;
-  gap: 4px;
-  padding: 11px 13px;
+  gap: 3px;
+  padding: 5px 5px;
   border: 1px solid var(--border);
   border-radius: 11px;
   background: #fafaf6;
@@ -552,15 +658,15 @@ function sendIngredientsToAgent() {
   background: #f0f7f3;
   box-shadow: 0 6px 16px rgba(15, 76, 69, 0.08);
 }
-.mode-card strong { font-size: 13.5px; color: var(--ink); }
+.mode-card strong { font-size: 11px; color: var(--ink); padding-right: 12px; }
 .mode-card.active strong { color: var(--green); }
-.mode-card p { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.mode-card p { margin: 0; color: var(--muted); font-size: 10.5px; line-height: 1.3; }
 .mode-dot {
   position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 13px;
-  height: 13px;
+  top: 6px;
+  right: 4px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   border: 1.5px solid #c3ccc7;
   background: #fff;
@@ -573,20 +679,63 @@ function sendIngredientsToAgent() {
 
 .pick-actions {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding-top: 2px;
-  border-top: 1px dashed #e3e7e2;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding-top: 0;
 }
-.pick-summary { color: var(--muted); font-size: 13px; }
+.pick-summary { color: var(--muted); font-size: 11px; }
 .pick-summary strong { color: var(--green); font-size: 15px; }
-.pick-buttons { display: flex; gap: 10px; }
+.pick-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.pick-buttons :deep(.el-button) { flex: 1; margin-left: 0; height: 28px; min-height: 28px; font-size: 11px; padding: 0 6px; }
+.pick-buttons :deep(.el-button--primary) { flex: 2; }
 
-@media (max-width: 1100px) {
-  .tab-layout { grid-template-columns: 1fr; }
-  .filter-panel { position: static; }
+.filter-panel,
+.pick-panel,
+.result-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #9ab1ab transparent;
+  overscroll-behavior: contain;
+}
+.filter-panel::-webkit-scrollbar,
+.pick-panel::-webkit-scrollbar,
+.result-scroll::-webkit-scrollbar { width: 7px; }
+.filter-panel::-webkit-scrollbar-thumb,
+.pick-panel::-webkit-scrollbar-thumb,
+.result-scroll::-webkit-scrollbar-thumb { background: #9ab1ab; border-radius: 999px; }
+
+@media (max-width: 1300px) {
+  .cookbook-page { max-width: none; }
+  .card-grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .tab-layout,
+  .tab2-layout { grid-template-columns: 1fr; }
+  .cookbook-body { overflow-y: auto; }
+  .tab-layout,
+  .tab2-layout { height: auto; }
+  .filter-panel,
+  .pick-panel,
+  .result-area { grid-row: auto; grid-column: 1; }
+  .filter-panel,
+  .pick-panel { grid-template-columns: 1fr; max-height: none; height: auto; overflow: visible; }
+  .result-area,
+  .result-area--with-toolbar { display: flex; flex-direction: column; height: auto; overflow: visible; }
+  .result-scroll { overflow: visible; padding-right: 0; }
+  .result-bar,
+  .result-footer { background: transparent; }
+  .result-footer--external {
+    grid-column: 1;
+    grid-row: auto;
+    justify-content: center;
+  }
+  .page-hero { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .data-note { padding-bottom: 0; }
+  .search-input { width: min(100%, 420px); }
   .mode-cards { grid-template-columns: 1fr; }
+  .pick-actions { flex-direction: column; align-items: stretch; }
+  .pick-buttons { display: flex; }
+  .pick-buttons :deep(.el-button) { width: auto; }
 }
 </style>
