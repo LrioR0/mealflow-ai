@@ -2,7 +2,14 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Plus, ShoppingCart } from '@element-plus/icons-vue'
-import { readProcurement, saveProcurement, type ProcurementItem } from '../../composables/procurement'
+import {
+  createProcurementItem,
+  deleteProcurementItem,
+  fetchProcurement,
+  readProcurement,
+  type ProcurementItem,
+  updateProcurementItem,
+} from '../../composables/procurement'
 
 defineOptions({ name: 'ProcurementView' })
 
@@ -17,22 +24,34 @@ function uid() {
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-function load() {
-  items.value = readProcurement()
-}
-
-function persist() {
+async function load() {
   try {
-    saveProcurement(items.value)
-    return true
+    const remote = await fetchProcurement()
+    items.value = remote
+    if (!remote.length) await migrateLocalItems()
   } catch {
-    ElMessage.error('保存失败，请检查浏览器存储空间')
-    load()
-    return false
+    ElMessage.error('采购清单加载失败，请检查后端连接')
   }
 }
 
-onMounted(load)
+async function migrateLocalItems() {
+  const localItems = readProcurement()
+  if (!localItems.length) return
+  for (const item of localItems) {
+    await createProcurementItem({
+      ingredient: item.ingredient,
+      quantity: item.quantity,
+      unit: item.unit,
+      checked: item.checked,
+      source: item.source,
+      sourceId: item.sourceId,
+    })
+  }
+  items.value = await fetchProcurement()
+  ElMessage.success('已将本机采购清单同步到家庭共享清单')
+}
+
+onMounted(() => void load())
 
 const pendingItems = computed(() => items.value.filter((item) => !item.checked))
 const completedItems = computed(() => items.value.filter((item) => item.checked))
@@ -42,30 +61,33 @@ function openAdd() {
   showAddDialog.value = true
 }
 
-function addManual() {
+async function addManual() {
   if (!form.ingredient.trim()) {
     ElMessage.warning('请填写采购食材')
     return
   }
   submitting.value = true
-  items.value.unshift({
-    id: uid(),
+  const created = await createProcurementItem({
     ingredient: form.ingredient.trim(),
     quantity: form.quantity.trim() || '—',
     unit: form.unit.trim() || '份',
     checked: false,
     source: 'manual',
   })
-  const saved = persist()
   submitting.value = false
-  if (!saved) return
+  items.value.unshift(created)
   showAddDialog.value = false
   ElMessage.success('已加入采购清单')
 }
 
-function toggle(item: ProcurementItem) {
+async function toggle(item: ProcurementItem) {
   item.checked = !item.checked
-  persist()
+  try {
+    await updateProcurementItem(item.id, { checked: item.checked })
+  } catch {
+    item.checked = !item.checked
+    ElMessage.error('采购状态更新失败')
+  }
 }
 
 async function remove(item: ProcurementItem) {
@@ -78,13 +100,15 @@ async function remove(item: ProcurementItem) {
   } catch {
     return
   }
+  await deleteProcurementItem(item.id)
   items.value = items.value.filter((current) => current.id !== item.id)
-  persist()
 }
 
-function clearCompleted() {
+async function clearCompleted() {
+  const completed = completedItems.value
+  await Promise.all(completed.map((item) => deleteProcurementItem(item.id)))
   items.value = items.value.filter((item) => !item.checked)
-  if (persist()) ElMessage.success('已清理已购买项目')
+  ElMessage.success('已清理已购买项目')
 }
 </script>
 

@@ -5,7 +5,7 @@ import { Bell, CircleCheck, Clock, Warning } from '@element-plus/icons-vue'
 
 import { fetchHousehold, type Household } from '../api/chat'
 import { fetchInventory, type InventoryItem } from '../api/inventory'
-import { readProcurement, type ProcurementItem } from '../composables/procurement'
+import { fetchProcurement, type ProcurementItem } from '../composables/procurement'
 
 interface Notice {
   id: string
@@ -166,11 +166,15 @@ function buildNotices(inventory: InventoryItem[], household: Household | null, p
 async function refresh() {
   loading.value = true
   try {
-    const [inventory, household] = await Promise.allSettled([fetchInventory(), fetchHousehold()])
+    const [inventory, household, procurement] = await Promise.allSettled([
+      fetchInventory(),
+      fetchHousehold(),
+      fetchProcurement(),
+    ])
     notices.value = buildNotices(
       inventory.status === 'fulfilled' ? inventory.value : [],
       household.status === 'fulfilled' ? household.value : null,
-      readProcurement(),
+      procurement.status === 'fulfilled' ? procurement.value : [],
     )
   } finally {
     loading.value = false

@@ -84,6 +84,8 @@ def _message_without_frontend_context(text: str) -> str:
 
 
 def _fallback_route(text: str) -> str:
+    if any(key in text for key in CONFIRM_KEYWORDS + MODIFY_KEYWORDS):
+        return "kitchen_plan"
     if re.search(r"天气|气温|下雨|晴天|阴天", text):
         return "general"
     qa_terms = (

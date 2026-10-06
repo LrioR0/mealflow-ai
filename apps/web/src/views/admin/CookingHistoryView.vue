@@ -12,6 +12,13 @@ import {
   StarFilled,
   User,
 } from '@element-plus/icons-vue'
+import {
+  createCookingRecord,
+  deleteCookingRecord,
+  fetchCookingRecords,
+  updateCookingRecord,
+  type CookingRecordPayload,
+} from '../../api/cooking'
 
 defineOptions({ name: 'CookingHistoryView' })
 
@@ -171,12 +178,65 @@ function save() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(records.value))
 }
 
-function load() {
+function fromApi(record: CookingRecordPayload): CookingRecord {
+  return {
+    id: record.id ?? uid(),
+    image: placeholder(record.dish_name, '#315d54', '#c69b53'),
+    dishName: record.dish_name,
+    cook: record.cook,
+    cookedAt: record.cooked_at,
+    servings: record.servings,
+    durationMinutes: record.duration_minutes,
+    difficulty: record.difficulty,
+    tags: record.tags ?? [],
+    ingredients: record.ingredients,
+    story: record.story,
+    steps: (record.steps ?? []).map((step) => ({ ...step, id: uid() })),
+    rating: record.rating,
+    nextTimeNote: record.next_time_note,
+    reviews: [],
+    createdAt: new Date().toISOString(),
+  }
+}
+
+function toApi(record: CookingRecord | RecordDraft): CookingRecordPayload {
+  return {
+    id: 'id' in record ? record.id : undefined,
+    dish_name: record.dishName,
+    cook: record.cook,
+    cooked_at: record.cookedAt,
+    servings: record.servings,
+    duration_minutes: record.durationMinutes,
+    difficulty: record.difficulty,
+    tags: 'tags' in record ? record.tags : record.tagsText.split(/[、,，]/).map((item) => item.trim()).filter(Boolean),
+    ingredients: record.ingredients,
+    story: record.story,
+    steps: record.steps.map(({ title, detail, minutes }) => ({ title, detail, minutes })),
+    rating: record.rating,
+    next_time_note: record.nextTimeNote,
+  }
+}
+
+async function load() {
   try {
+    const remote = await fetchCookingRecords()
+    if (remote.length) {
+      records.value = remote.map(fromApi)
+      return
+    }
     const cached = localStorage.getItem(STORAGE_KEY)
-    records.value = cached ? JSON.parse(cached) : seedRecords()
+    const localRecords: CookingRecord[] = cached ? JSON.parse(cached) : seedRecords()
+    records.value = localRecords
+    for (const record of localRecords) {
+      await createCookingRecord(toApi(record))
+    }
   } catch {
-    records.value = seedRecords()
+    try {
+      const cached = localStorage.getItem(STORAGE_KEY)
+      records.value = cached ? JSON.parse(cached) : seedRecords()
+    } catch {
+      records.value = seedRecords()
+    }
   }
   save()
 }
@@ -292,7 +352,7 @@ async function onImageChange(event: Event) {
   }
 }
 
-function submitRecord() {
+async function submitRecord() {
   if (!form.dishName.trim() || !form.cook.trim()) {
     ElMessage.warning('请填写菜名和做菜人')
     return
@@ -321,8 +381,13 @@ function submitRecord() {
     reviews: existing?.reviews ?? [],
     createdAt: existing?.createdAt ?? new Date().toISOString(),
   }
-  if (existing) Object.assign(existing, record)
-  else records.value.unshift(record)
+  if (existing) {
+    const updated = await updateCookingRecord(existing.id, toApi(record))
+    Object.assign(existing, { ...record, ...fromApi(updated), image: existing.image, reviews: existing.reviews })
+  } else {
+    const created = await createCookingRecord(toApi(record))
+    records.value.unshift({ ...record, ...fromApi(created), image: record.image, reviews: record.reviews })
+  }
   save()
   dialogVisible.value = false
   ElMessage.success(existing ? '下厨记录已更新' : '这一餐已经收进下厨足迹')
@@ -338,6 +403,7 @@ async function removeRecord(record: CookingRecord) {
   } catch {
     return
   }
+  await deleteCookingRecord(record.id)
   records.value = records.value.filter((item) => item.id !== record.id)
   if (activeRecord.value?.id === record.id) detailVisible.value = false
   save()

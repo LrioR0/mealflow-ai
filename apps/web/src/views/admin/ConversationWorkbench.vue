@@ -254,13 +254,13 @@ async function toggleRecipe(dish: string, plan: AgentRun | null) {
   recipeCache.value = { ...recipeCache.value, [dish]: detail }
 }
 
-function confirmPlan(bubble: ChatBubble) {
+async function confirmPlan(bubble: ChatBubble) {
   if (sending.value) return
   const option = bubble.plan?.options.find((item) => item.strategy === bubble.selectedStrategy)
   if (!option || !bubble.plan) return
   if (option?.procurement_list?.length) {
     try {
-      const added = generateProcurement(option.procurement_list, `${bubble.plan.id}:${option.strategy}`)
+      const added = await generateProcurement(option.procurement_list, `${bubble.plan.id}:${option.strategy}`)
       ElMessage.success(added ? `已将 ${added} 项食材加入采购清单` : '这套方案的采购项已在清单中')
     } catch {
       ElMessage.error('采购清单保存失败，请检查浏览器存储空间')

@@ -1,4 +1,10 @@
+import os
+
 import pytest
+
+# 在导入数据库模块之前切换配置，测试不得触碰真实家庭数据库或调用收费模型。
+os.environ["DATABASE_URL"] = "sqlite://"
+os.environ["LLM_API_KEY"] = ""
 
 from app.db.seed import seed_demo_data
 

@@ -249,3 +249,40 @@ class AgentChatMessage(TimestampMixin, Base):
     run_id: Mapped[str | None] = mapped_column(ForeignKey("agent_runs.id"), nullable=True)
     plan_id: Mapped[str | None] = mapped_column(ForeignKey("meal_plans.id"), nullable=True)
 
+
+class ProcurementItem(TimestampMixin, Base):
+    """家庭共享采购清单项。"""
+
+    __tablename__ = "procurement_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    ingredient: Mapped[str] = mapped_column(String(120))
+    quantity: Mapped[str] = mapped_column(String(40), default="—")
+    unit: Mapped[str] = mapped_column(String(20), default="份")
+    checked: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str] = mapped_column(String(20), default="manual")
+    source_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CookingRecord(TimestampMixin, Base):
+    """家庭共享下厨足迹文字记录；图片暂由前端本地保留。"""
+
+    __tablename__ = "cooking_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    dish_name: Mapped[str] = mapped_column(String(120), index=True)
+    cook: Mapped[str] = mapped_column(String(80))
+    cooked_at: Mapped[str] = mapped_column(String(40))
+    servings: Mapped[int] = mapped_column(Integer, default=1)
+    duration_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    difficulty: Mapped[str] = mapped_column(String(20), default="家常")
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    ingredients: Mapped[str] = mapped_column(Text, default="")
+    story: Mapped[str] = mapped_column(Text, default="")
+    steps: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    rating: Mapped[float] = mapped_column(Numeric(3, 1), default=5)
+    next_time_note: Mapped[str] = mapped_column(Text, default="")
+

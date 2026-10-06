@@ -15,7 +15,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -133,9 +133,11 @@ def _get_or_create_ingredient(
 
 def _get_or_create_user(
     session: Session, user_id: str, email: str, display_name: str
-) -> User:
+) -> tuple[User, bool]:
     user = session.get(User, user_id)
+    created = False
     if user is None:
+        created = True
         user = User(
             id=user_id,
             email=email,
@@ -144,11 +146,21 @@ def _get_or_create_user(
         )
         session.add(user)
         session.flush()
-    return user
+    return user, created
 
 
 def seed_demo_data() -> dict[str, int]:
     with SessionLocal() as session:  # type: Session
+        # 只初始化尚未建立的家庭；已有家庭即使删空库存也不重新灌入演示数据。
+        existing = session.get(Workspace, HOME_WORKSPACE_ID)
+        if existing is not None:
+            return {
+                "members": session.scalar(select(func.count()).select_from(WorkspaceMember).where(WorkspaceMember.workspace_id == HOME_WORKSPACE_ID)),
+                "events": session.scalar(select(func.count()).select_from(MemberEvent).where(MemberEvent.workspace_id == HOME_WORKSPACE_ID)),
+                "recipes": session.scalar(select(func.count()).select_from(Recipe)),
+                "ingredients": session.scalar(select(func.count()).select_from(Ingredient)),
+                "inventory": session.scalar(select(func.count()).select_from(InventoryItem).where(InventoryItem.workspace_id == HOME_WORKSPACE_ID)),
+            }
         tomorrow = date.today() + timedelta(days=1)
         today = date.today()
 
@@ -167,21 +179,27 @@ def seed_demo_data() -> dict[str, int]:
             session.add(site)
             session.flush()
 
-        me = _get_or_create_user(session, ME_USER_ID, "me@home.demo", "我")
-        me.gender = "男"
-        me.residency = "resident"
-        me.taboo = None
-        me.note = None
-        partner = _get_or_create_user(session, PARTNER_USER_ID, "partner@home.demo", "对象")
-        partner.gender = "女"
-        partner.residency = "resident"
-        partner.taboo = "香菜"
-        partner.note = None
-        guest = _get_or_create_user(session, GUEST_USER_ID, "guest@home.demo", "老李")
-        guest.gender = "男"
-        guest.residency = "guest"
-        guest.taboo = "海鲜"
-        guest.note = "周末偶尔来吃饭"
+        me, me_created = _get_or_create_user(session, ME_USER_ID, "me@home.demo", "我")
+        if me_created or me.gender is None:
+            me.gender = "男"
+        if me_created or not me.residency:
+            me.residency = "resident"
+        partner, partner_created = _get_or_create_user(session, PARTNER_USER_ID, "partner@home.demo", "对象")
+        if partner_created or partner.gender is None:
+            partner.gender = "女"
+        if partner_created or not partner.residency:
+            partner.residency = "resident"
+        if partner_created or partner.taboo is None:
+            partner.taboo = "香菜"
+        guest, guest_created = _get_or_create_user(session, GUEST_USER_ID, "guest@home.demo", "老李")
+        if guest_created or guest.gender is None:
+            guest.gender = "男"
+        if guest_created or not guest.residency:
+            guest.residency = "guest"
+        if guest_created or guest.taboo is None:
+            guest.taboo = "海鲜"
+        if guest_created or guest.note is None:
+            guest.note = "周末偶尔来吃饭"
 
         for user, role in ((me, "owner"), (partner, "member"), (guest, "guest")):
             exists = session.scalar(
@@ -287,10 +305,7 @@ def seed_demo_data() -> dict[str, int]:
                         expires_on=expires_on,
                     )
                 )
-            else:
-                item.quantity = quantity
-                item.unit = unit
-                item.expires_on = expires_on
+            # 已有库存由用户维护，种子脚本不再覆盖数量、单位和到期日期。
 
         # 菜谱与配方明细(data/seed/recipes.json,含 taste_tags)
         payload = json.loads(RECIPE_SEED_PATH.read_text(encoding="utf-8"))
