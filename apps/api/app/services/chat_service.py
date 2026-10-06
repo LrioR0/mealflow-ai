@@ -543,7 +543,7 @@ async def _llm_stream_text(
     if provider is None:
         return
     try:
-        async for kind, delta in provider.chat_stream(prompt_messages):
+        async for kind, delta in provider.chat_stream(messages=prompt_messages):
             if delta:
                 yield kind, delta
     except Exception:
