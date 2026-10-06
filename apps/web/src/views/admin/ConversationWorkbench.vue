@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import { generateProcurement } from '../../composables/procurement'
 import { useAgentHandoffStore } from '../../stores/agentHandoff'
 
-import { Check, User } from '@element-plus/icons-vue'
+import { ArrowDown, Check, CopyDocument, User } from '@element-plus/icons-vue'
 
 import {
   conversationStarted,
@@ -29,6 +29,18 @@ interface StatusStep {
   detail: string
 }
 
+interface CandidateItem {
+  recipe_id: string
+  name: string
+  ingredients_summary: string
+  conflict_level: 'forbidden' | 'warn' | null
+  conflict_summary: string | null
+  expiring: boolean
+  expiring_used: string[]
+  used_fridge: string[]
+  missing: string[]
+}
+
 interface ChatBubble {
   id: string
   role: 'user' | 'assistant'
@@ -41,7 +53,11 @@ interface ChatBubble {
   questions: string[]
   streaming: boolean
   error: string
+  stopped?: boolean
   searchQuery?: string
+  candidates?: CandidateItem[]
+  candidatesQuery?: string
+  thinkingOpen?: boolean
 }
 
 const STEP_LABELS: Record<string, string> = {
@@ -74,6 +90,8 @@ watch(
 )
 const input = ref('')
 const sending = ref(false)
+const currentAbort = ref<AbortController | null>(null)
+const copiedId = ref<string | null>(null)
 const sessionId = ref<string | null>(null)
 const listEl = ref<HTMLElement | null>(null)
 const recipeCache = ref<Record<string, RecipeDetail>>({})
@@ -263,6 +281,29 @@ async function toggleRecipe(dish: string, plan: AgentRun | null) {
   recipeCache.value = { ...recipeCache.value, [dish]: detail }
 }
 
+// 候选菜列表点击:复用详情展开,按当前勾选的用餐人数换算用量
+async function openCandidate(item: CandidateItem) {
+  if (expandedDish.value === item.name) {
+    expandedDish.value = null
+    return
+  }
+  expandedDish.value = item.name
+  if (recipeCache.value[item.name]) return
+  const detail = await fetchRecipeDetail(
+    String(item.recipe_id),
+    selectedDiners.value.length || undefined,
+  )
+  recipeCache.value = { ...recipeCache.value, [item.name]: detail }
+}
+
+// 库存使用标注:临期食材带(临期)后缀
+function fridgeUsageText(item: CandidateItem): string {
+  if (!item.used_fridge?.length) return ''
+  return item.used_fridge
+    .map((name) => (item.expiring_used?.includes(name) ? `${name}(临期)` : name))
+    .join('、')
+}
+
 async function confirmPlan(bubble: ChatBubble) {
   if (sending.value) return
   const option = bubble.plan?.options.find((item) => item.strategy === bubble.selectedStrategy)
@@ -333,15 +374,20 @@ async function send(preset?: string) {
   scrollBottom()
   let thinkingIdleTimer: ReturnType<typeof setTimeout> | undefined
 
+  // 中断控制器:发送后可主动停止流式生成(后端 SSE 随断开自动取消)
+  const controller = new AbortController()
+  currentAbort.value = controller
+
   try {
     for await (const event of streamChat({
       session_id: sessionId.value,
       diners_user_ids: selectedDinerIds.value,
       message: requestMessage,
-    })) {
+    }, controller.signal)) {
       if (event.event === 'thinking') {
         assistant.thinking += String(event.data.delta ?? '')
         assistant.thinkingDone = false
+        assistant.thinkingOpen = true // 流式期间自动展开,实时看思维链
         clearTimeout(thinkingIdleTimer)
         thinkingIdleTimer = setTimeout(() => {
           assistant.thinkingDone = true
@@ -370,6 +416,11 @@ async function send(preset?: string) {
         assistant.thinkingDone = true
         assistant.plan = event.data as unknown as AgentRun
         assistant.selectedStrategy = assistant.plan.options[0]?.strategy ?? ''
+      } else if (event.event === 'candidates') {
+        // 食材模糊查询:候选菜列表(规则召回,不含 run),点击展开做法详情
+        assistant.thinkingDone = true
+        assistant.candidatesQuery = String(event.data.query ?? '')
+        assistant.candidates = (event.data.items as CandidateItem[]) ?? []
       } else if (event.event === 'questions') {
         assistant.questions = (event.data.items as string[]) ?? []
       } else if (event.event === 'error') {
@@ -377,18 +428,44 @@ async function send(preset?: string) {
       } else if (event.event === 'done') {
         assistant.streaming = false
         assistant.thinkingDone = true
+        // 菜单列表的思考过程保持展开(决策透明);其余分支收起,答案为主
+        assistant.thinkingOpen = Boolean(assistant.candidates?.length)
         sessionId.value = (event.data.session_id as string) ?? sessionId.value
         assistant.searchQuery = typeof event.data.search_query === 'string' ? event.data.search_query : undefined
       }
       scrollBottom()
     }
   } catch (reason) {
-    assistant.error = reason instanceof Error ? reason.message : '连接中断'
+    // 主动停止:静默收尾并标注,不当错误弹给用户
+    if (reason instanceof DOMException && reason.name === 'AbortError') {
+      assistant.stopped = true
+    } else {
+      assistant.error = reason instanceof Error ? reason.message : '连接中断'
+    }
   } finally {
+    currentAbort.value = null
     clearTimeout(thinkingIdleTimer)
     assistant.streaming = false
     sending.value = false
     scrollBottom()
+  }
+}
+
+// 停止生成:中断当前流,已输出的内容保留
+function stopGeneration() {
+  currentAbort.value?.abort()
+}
+
+// 复制消息原文;按钮上的「已复制」反馈短暂显示
+async function copyMessage(bubble: ChatBubble) {
+  try {
+    await navigator.clipboard.writeText(bubble.content)
+    copiedId.value = bubble.id
+    setTimeout(() => {
+      if (copiedId.value === bubble.id) copiedId.value = null
+    }, 1500)
+  } catch {
+    ElMessage.error('复制失败，请手动选择文本复制')
   }
 }
 
@@ -413,20 +490,32 @@ async function send(preset?: string) {
         </div>
 
         <template v-for="bubble in messages" :key="bubble.id">
-          <!-- 用户消息:右对齐气泡 -->
+          <!-- 用户消息:右对齐气泡,悬浮渐显复制按钮 -->
           <div v-if="bubble.role === 'user'" class="msg-row user">
             <div class="user-bubble">{{ bubble.content }}</div>
+            <button class="copy-btn" type="button" title="复制内容" @click="copyMessage(bubble)">
+              <el-icon><component :is="copiedId === bubble.id ? Check : CopyDocument" /></el-icon>
+              {{ copiedId === bubble.id ? '已复制' : '复制' }}
+            </button>
           </div>
 
           <!-- Agent 消息:思考直播 → 步骤 → 回答 → 方案卡 → 反问 -->
           <div v-else class="msg-row assistant">
             <div class="assistant-block">
               <div
-                v-if="bubble.streaming"
+                v-if="bubble.streaming && !bubble.thinking && !bubble.steps.length"
                 class="thinking-line"
               >
-                <span v-if="!bubble.content && !bubble.steps.length" class="spinner"></span>
-                <span v-if="bubble.thinking && !bubble.content && !bubble.thinkingDone && !allStepsDone(bubble)" class="thinking-live">✦ 正在分析这顿饭的安排</span>
+                <span class="spinner"></span>
+              </div>
+
+              <!-- 思考过程:LLM 为真实思维链,规则分支为真实执行步骤;流式自动展开,完成收起(菜单列表保持展开) -->
+              <div v-if="bubble.thinking" class="thinking-box">
+                <button class="thinking-toggle" type="button" @click="bubble.thinkingOpen = !bubble.thinkingOpen">
+                  <span>{{ bubble.streaming && !bubble.thinkingDone ? '✦ 正在思考' : '✦ 思考过程' }}</span>
+                  <el-icon class="thinking-chev" :class="{ open: bubble.thinkingOpen }"><ArrowDown /></el-icon>
+                </button>
+                <pre v-show="bubble.thinkingOpen" class="thinking-text">{{ bubble.thinking }}</pre>
               </div>
 
               <ol v-if="bubble.streaming && bubble.steps.length" class="tool-steps">
@@ -457,7 +546,79 @@ async function send(preset?: string) {
 
 
               <div v-if="bubble.content" class="assistant-text" v-html="renderMarkdown(bubble.content)"></div>
+              <p v-if="bubble.stopped" class="stopped-note">⏹ 已停止生成，以上为已输出的内容</p>
               <p v-if="bubble.error" class="error-message">{{ bubble.error }}</p>
+
+              <!-- 食材模糊查询:候选菜列表(仅标注忌口/过敏,不过滤),点击展开做法 -->
+              <div v-if="bubble.candidates?.length" class="candidate-card">
+                <div class="candidate-card-head">
+                  <strong>含「{{ bubble.candidatesQuery }}」的菜</strong>
+                  <small>共 {{ bubble.candidates.length }} 道 · 点击查看做法</small>
+                </div>
+                <div class="candidate-items">
+                  <div v-for="item in bubble.candidates" :key="item.recipe_id" class="candidate-row">
+                    <button
+                      class="candidate-item"
+                      :class="{ expanded: expandedDish === item.name }"
+                      @click="openCandidate(item)"
+                    >
+                      <span class="candidate-line-top">
+                        <span class="candidate-name">{{ item.name }}</span>
+                        <span class="candidate-tags">
+                          <span v-if="item.expiring" class="candidate-tag expiring">临期优先</span>
+                          <span v-if="item.conflict_level === 'forbidden'" class="candidate-tag forbidden">
+                            ⚠ {{ item.conflict_summary }}
+                          </span>
+                          <span v-else-if="item.conflict_level === 'warn'" class="candidate-tag warn">
+                            {{ item.conflict_summary }}
+                          </span>
+                        </span>
+                      </span>
+                      <span class="candidate-line-sub">
+                        <small class="candidate-ings">{{ item.ingredients_summary }}</small>
+                        <small v-if="item.used_fridge?.length" class="candidate-fridge">
+                          用冰箱：{{ fridgeUsageText(item) }}
+                        </small>
+                        <small v-if="item.missing?.length" class="candidate-missing">
+                          缺：{{ item.missing.join('、') }}
+                        </small>
+                      </span>
+                    </button>
+                    <div
+                      v-if="expandedDish === item.name && recipeCache[item.name]"
+                      class="recipe-detail"
+                    >
+                      <div class="recipe-meta">
+                        {{ recipeCache[item.name].duration_minutes }} 分钟 ·
+                        {{ recipeCache[item.name].kcal_per_serving ?? '—' }} kcal/份 ·
+                        {{ recipeCache[item.name].source_name }}
+                      </div>
+                      <ol>
+                        <li
+                          v-for="(step, stepIndex) in recipeCache[item.name].steps"
+                          :key="stepIndex"
+                        >
+                          {{ step }}
+                        </li>
+                      </ol>
+                      <table>
+                        <thead>
+                          <tr><th>食材</th><th>用量</th><th>冰箱</th><th>参考价</th></tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="row in recipeCache[item.name].ingredients" :key="row.key">
+                            <td>{{ row.name }}</td>
+                            <td>{{ row.quantity }}{{ row.unit }}</td>
+                            <td>{{ row.available ?? 0 }}{{ row.unit }}</td>
+                            <td>{{ row.reference_price ? `¥${row.reference_price}/${row.unit}` : '—' }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div v-if="bubble.searchQuery && !bubble.streaming" class="external-recipe">
                 <a :href="`https://www.xiachufang.com/search/?keyword=${encodeURIComponent(bubble.searchQuery)}`" target="_blank" rel="noopener noreferrer">
                   去下厨房搜索「{{ bubble.searchQuery }}」↗
@@ -593,6 +754,12 @@ async function send(preset?: string) {
                 </el-button>
               </div>
             </div>
+
+            <!-- 悬浮渐显的复制按钮:渐变出现,不突兀 -->
+            <button class="copy-btn" type="button" title="复制内容" @click="copyMessage(bubble)">
+              <el-icon><component :is="copiedId === bubble.id ? Check : CopyDocument" /></el-icon>
+              {{ copiedId === bubble.id ? '已复制' : '复制' }}
+            </button>
           </div>
         </template>
       </div>
@@ -646,13 +813,15 @@ async function send(preset?: string) {
             </div>
           </div>
           <el-button
+            v-if="!sending"
             type="primary"
             round
-            :disabled="sending || input.trim().length < 2 || (household !== null && !selectedDiners.length)"
+            :disabled="input.trim().length < 2 || (household !== null && !selectedDiners.length)"
             @click="send()"
           >
-            {{ sending ? 'Agent 执行中…' : '发送 ⏎' }}
+            发送 ⏎
           </el-button>
+          <el-button v-else class="stop-btn" round @click="stopGeneration">⏹ 停止生成</el-button>
         </div>
       </div>
     </div>
@@ -742,6 +911,31 @@ async function send(preset?: string) {
 .hero-chips .el-button:hover { border-color: var(--green-2); background: #f3f8f5; }
 .chip-icon { margin-right: 4px; color: var(--gold); }
 .msg-row { display: flex; }
+/* 悬浮渐显的复制按钮:透明+下移态过渡到实位,不突兀 */
+.copy-btn {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 3px;
+  padding: 2.5px 9px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 0.22s ease, transform 0.22s ease, color 0.15s ease, background 0.15s ease;
+}
+.msg-row:hover .copy-btn {
+  opacity: 1;
+  transform: translateY(0);
+}
+.copy-btn:hover { background: #eef4f0; color: var(--green-2); }
+.msg-row.user .copy-btn { align-self: flex-end; }
+.stopped-note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .msg-row.user { justify-content: flex-end; }
 .user-bubble {
   max-width: 78%;
@@ -762,6 +956,17 @@ async function send(preset?: string) {
   color: #7a8a86;
 }
 .thinking-line.done { color: #9aa8a4; }
+.thinking-box {
+  margin-bottom: 0.5rem;
+  font-size: 12.5px;
+  color: #7a8a86;
+}
+.thinking-chev {
+  margin-left: 4px;
+  vertical-align: -2px;
+  transition: transform 0.18s ease;
+}
+.thinking-chev.open { transform: rotate(180deg); }
 .thinking-toggle {
   border: 0;
   background: none;
@@ -991,6 +1196,78 @@ async function send(preset?: string) {
   border-top: 1px dashed var(--border);
 }
 .plan-foot small { color: #9aa8a4; }
+/* ===== 食材模糊查询:候选菜列表卡(与方案卡同视觉语言,仅标注不过滤) ===== */
+.candidate-card {
+  margin-top: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: linear-gradient(145deg, #fff, #fbfdfb);
+  box-shadow: 0 8px 24px rgba(33, 60, 54, 0.05);
+  overflow: hidden;
+}
+.candidate-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.6rem 0.95rem 0.5rem;
+  border-bottom: 1px solid #eef4f0;
+}
+.candidate-card-head strong { font-size: 13.5px; color: var(--green); }
+.candidate-card-head small { color: var(--muted); font-size: 11.5px; }
+.candidate-items { display: grid; }
+.candidate-row + .candidate-row { border-top: 1px solid #f0f4f1; }
+.candidate-item {
+  width: 100%;
+  display: block;
+  padding: 0.55rem 0.95rem;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.candidate-item:hover { background: #f4faf7; }
+.candidate-item.expanded { background: #eef7f2; }
+.candidate-line-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+}
+.candidate-name {
+  flex-shrink: 0;
+  font-weight: 650;
+  font-size: 14px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.candidate-item:hover .candidate-name { color: var(--green-2); }
+.candidate-line-sub {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.7rem;
+  margin-top: 3px;
+}
+.candidate-ings {
+  color: var(--muted);
+  font-size: 12px;
+}
+.candidate-fridge { color: #0f6b4f; font-size: 12px; }
+.candidate-missing { color: #a15b21; font-size: 12px; }
+.candidate-tags { display: flex; gap: 5px; flex-shrink: 0; }
+.candidate-tag {
+  padding: 2.5px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.candidate-tag.forbidden { background: #fdeceb; color: #a43c36; }
+.candidate-tag.warn { background: #fdf3e0; color: #8a5a12; }
+.candidate-tag.expiring { background: #e7f2ee; color: #0f6b4f; }
+.candidate-row .recipe-detail { margin: 0 0.95rem 0.6rem; }
 .chat-input {
   flex-shrink: 0;
   border: 1px solid var(--border);
