@@ -78,11 +78,12 @@ export function normalizeRecipe(raw: ExtendedRecipeRaw, index: number): Recipe {
     heat,
     likes: Number(raw.likes) || 0,
     collect: Number(raw.collect) || 0,
+    image: typeof raw.image === 'string' && raw.image.trim() ? raw.image.trim() : null,
   }
 }
 
 export async function loadRecipes(): Promise<Recipe[]> {
-  const response = await fetch('/data/recipes_extended.json')
+  const response = await fetch('/data/recipes_merged.json')
   if (!response.ok) {
     throw new Error(`菜谱数据加载失败 (${response.status})`)
   }
