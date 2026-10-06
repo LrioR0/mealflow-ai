@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import { generateProcurement } from '../../composables/procurement'
 import { useAgentHandoffStore } from '../../stores/agentHandoff'
 
-import { ArrowDown, Check, CopyDocument, User } from '@element-plus/icons-vue'
+import { Check, User } from '@element-plus/icons-vue'
 
 import {
   conversationStarted,
@@ -55,9 +55,9 @@ interface ChatBubble {
   error: string
   stopped?: boolean
   searchQuery?: string
+  searchQueries?: string[]
   candidates?: CandidateItem[]
   candidatesQuery?: string
-  thinkingOpen?: boolean
 }
 
 const STEP_LABELS: Record<string, string> = {
@@ -91,7 +91,6 @@ watch(
 const input = ref('')
 const sending = ref(false)
 const currentAbort = ref<AbortController | null>(null)
-const copiedId = ref<string | null>(null)
 const sessionId = ref<string | null>(null)
 const listEl = ref<HTMLElement | null>(null)
 const recipeCache = ref<Record<string, RecipeDetail>>({})
@@ -387,7 +386,6 @@ async function send(preset?: string) {
       if (event.event === 'thinking') {
         assistant.thinking += String(event.data.delta ?? '')
         assistant.thinkingDone = false
-        assistant.thinkingOpen = true // 流式期间自动展开,实时看思维链
         clearTimeout(thinkingIdleTimer)
         thinkingIdleTimer = setTimeout(() => {
           assistant.thinkingDone = true
@@ -428,10 +426,13 @@ async function send(preset?: string) {
       } else if (event.event === 'done') {
         assistant.streaming = false
         assistant.thinkingDone = true
-        // 菜单列表的思考过程保持展开(决策透明);其余分支收起,答案为主
-        assistant.thinkingOpen = Boolean(assistant.candidates?.length)
         sessionId.value = (event.data.session_id as string) ?? sessionId.value
         assistant.searchQuery = typeof event.data.search_query === 'string' ? event.data.search_query : undefined
+        assistant.searchQueries = Array.isArray(event.data.search_queries)
+          ? event.data.search_queries.map((query) => String(query)).filter(Boolean)
+          : assistant.searchQuery
+            ? [assistant.searchQuery]
+            : undefined
       }
       scrollBottom()
     }
@@ -456,19 +457,6 @@ function stopGeneration() {
   currentAbort.value?.abort()
 }
 
-// 复制消息原文;按钮上的「已复制」反馈短暂显示
-async function copyMessage(bubble: ChatBubble) {
-  try {
-    await navigator.clipboard.writeText(bubble.content)
-    copiedId.value = bubble.id
-    setTimeout(() => {
-      if (copiedId.value === bubble.id) copiedId.value = null
-    }, 1500)
-  } catch {
-    ElMessage.error('复制失败，请手动选择文本复制')
-  }
-}
-
 </script>
 
 <template>
@@ -490,32 +478,21 @@ async function copyMessage(bubble: ChatBubble) {
         </div>
 
         <template v-for="bubble in messages" :key="bubble.id">
-          <!-- 用户消息:右对齐气泡,悬浮渐显复制按钮 -->
+          <!-- 用户消息:右对齐气泡 -->
           <div v-if="bubble.role === 'user'" class="msg-row user">
             <div class="user-bubble">{{ bubble.content }}</div>
-            <button class="copy-btn" type="button" title="复制内容" @click="copyMessage(bubble)">
-              <el-icon><component :is="copiedId === bubble.id ? Check : CopyDocument" /></el-icon>
-              {{ copiedId === bubble.id ? '已复制' : '复制' }}
-            </button>
           </div>
 
           <!-- Agent 消息:思考直播 → 步骤 → 回答 → 方案卡 → 反问 -->
           <div v-else class="msg-row assistant">
             <div class="assistant-block">
-              <div
-                v-if="bubble.streaming && !bubble.thinking && !bubble.steps.length"
-                class="thinking-line"
-              >
-                <span class="spinner"></span>
-              </div>
-
-              <!-- 思考过程:LLM 为真实思维链,规则分支为真实执行步骤;流式自动展开,完成收起(菜单列表保持展开) -->
-              <div v-if="bubble.thinking" class="thinking-box">
-                <button class="thinking-toggle" type="button" @click="bubble.thinkingOpen = !bubble.thinkingOpen">
-                  <span>{{ bubble.streaming && !bubble.thinkingDone ? '✦ 正在思考' : '✦ 思考过程' }}</span>
-                  <el-icon class="thinking-chev" :class="{ open: bubble.thinkingOpen }"><ArrowDown /></el-icon>
-                </button>
-                <pre v-show="bubble.thinkingOpen" class="thinking-text">{{ bubble.thinking }}</pre>
+              <!-- 思考中:spinner + 流光文案,让用户知道模型正在思考;正文到达后消失 -->
+              <div v-if="bubble.streaming" class="thinking-line">
+                <span v-if="!bubble.content && !bubble.steps.length" class="spinner"></span>
+                <span
+                  v-if="bubble.thinking && !bubble.content && !bubble.thinkingDone && !allStepsDone(bubble)"
+                  class="thinking-live"
+                >✦ 正在分析这顿饭的安排</span>
               </div>
 
               <ol v-if="bubble.streaming && bubble.steps.length" class="tool-steps">
@@ -619,9 +596,15 @@ async function copyMessage(bubble: ChatBubble) {
                 </div>
               </div>
 
-              <div v-if="bubble.searchQuery && !bubble.streaming" class="external-recipe">
-                <a :href="`https://www.xiachufang.com/search/?keyword=${encodeURIComponent(bubble.searchQuery)}`" target="_blank" rel="noopener noreferrer">
-                  去下厨房搜索「{{ bubble.searchQuery }}」↗
+              <div v-if="bubble.searchQueries?.length && !bubble.streaming" class="external-recipe">
+                <a
+                  v-for="query in bubble.searchQueries"
+                  :key="query"
+                  :href="`https://www.xiachufang.com/search/?keyword=${encodeURIComponent(query)}`"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  去下厨房搜索「{{ query }}」↗
                 </a>
                 <small>外部菜谱为通用做法，未适配你的忌口与体质，请自行调整。</small>
               </div>
@@ -754,12 +737,6 @@ async function copyMessage(bubble: ChatBubble) {
                 </el-button>
               </div>
             </div>
-
-            <!-- 悬浮渐显的复制按钮:渐变出现,不突兀 -->
-            <button class="copy-btn" type="button" title="复制内容" @click="copyMessage(bubble)">
-              <el-icon><component :is="copiedId === bubble.id ? Check : CopyDocument" /></el-icon>
-              {{ copiedId === bubble.id ? '已复制' : '复制' }}
-            </button>
           </div>
         </template>
       </div>
@@ -911,30 +888,6 @@ async function copyMessage(bubble: ChatBubble) {
 .hero-chips .el-button:hover { border-color: var(--green-2); background: #f3f8f5; }
 .chip-icon { margin-right: 4px; color: var(--gold); }
 .msg-row { display: flex; }
-/* 悬浮渐显的复制按钮:透明+下移态过渡到实位,不突兀 */
-.copy-btn {
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 3px;
-  padding: 2.5px 9px;
-  border: 0;
-  border-radius: 999px;
-  background: none;
-  color: var(--muted);
-  font-size: 11.5px;
-  cursor: pointer;
-  opacity: 0;
-  transform: translateY(3px);
-  transition: opacity 0.22s ease, transform 0.22s ease, color 0.15s ease, background 0.15s ease;
-}
-.msg-row:hover .copy-btn {
-  opacity: 1;
-  transform: translateY(0);
-}
-.copy-btn:hover { background: #eef4f0; color: var(--green-2); }
-.msg-row.user .copy-btn { align-self: flex-end; }
 .stopped-note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .msg-row.user { justify-content: flex-end; }
 .user-bubble {
@@ -956,38 +909,6 @@ async function copyMessage(bubble: ChatBubble) {
   color: #7a8a86;
 }
 .thinking-line.done { color: #9aa8a4; }
-.thinking-box {
-  margin-bottom: 0.5rem;
-  font-size: 12.5px;
-  color: #7a8a86;
-}
-.thinking-chev {
-  margin-left: 4px;
-  vertical-align: -2px;
-  transition: transform 0.18s ease;
-}
-.thinking-chev.open { transform: rotate(180deg); }
-.thinking-toggle {
-  border: 0;
-  background: none;
-  padding: 0;
-  color: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-  font-weight: 600;
-}
-.thinking-toggle:hover { color: #1f7a6d; }
-.thinking-text {
-  white-space: pre-wrap;
-  opacity: 0.75;
-  max-height: 110px;
-  overflow-y: auto;
-  border-left: 2px solid #d8e4e0;
-  padding-left: 0.55rem;
-  margin-top: 0.35rem;
-  animation: pulse 1.4s ease-in-out infinite;
-}
-@keyframes pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 0.95; } }
 .spinner {
   display: inline-block;
   width: 13px;
@@ -1073,10 +994,10 @@ async function copyMessage(bubble: ChatBubble) {
 .step-detail { color: #8ba39d; }
 .assistant-text { line-height: 1.75; font-size: 14.5px; }
 .assistant-text :deep(strong) { color: var(--green); font-weight: 750; }
-.external-recipe { display: grid; gap: 4px; margin-top: 10px; padding: 10px 12px; border: 1px solid #dce9e3; border-radius: 10px; background: #f7fbf8; }
+.external-recipe { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-top: 10px; padding: 10px 12px; border: 1px solid #dce9e3; border-radius: 10px; background: #f7fbf8; }
 .external-recipe a { color: var(--green); font-size: 13px; font-weight: 700; text-decoration: none; }
 .external-recipe a:hover { text-decoration: underline; }
-.external-recipe small { color: var(--muted); font-size: 11px; }
+.external-recipe small { flex-basis: 100%; color: var(--muted); font-size: 11px; }
 .chip-row { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.6rem; }
 .plan-card {
   margin-top: 0.8rem;

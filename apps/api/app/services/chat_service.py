@@ -59,6 +59,9 @@ GENERAL_PROMPT = (
     "当用户问你是谁或自然需要自我介绍时，请说自己叫 Mina。"
     "请用简短、自然的中文回答。天气、新闻等实时信息如果没有对应工具，不要编造，"
     "直接说明当前无法获取实时数据，并自然地告诉用户你能帮助安排饮食。"
+    "\n\n[菜名标注规则]只要回复中出现具体菜名（例如推荐了菜品、提到了某道菜的做法），"
+    "就必须在回复的最后一行单独输出<dishes>菜名1|菜名2</dishes>，最多3个菜名，用|分隔，"
+    "例如:<dishes>番茄炒蛋|青椒肉丝</dishes>。整条回复没有具体菜名时才允许省略此行。"
 )
 
 QA_PROMPT = (
@@ -67,6 +70,14 @@ QA_PROMPT = (
     "请允许使用你的通用知识，用简体中文给出准确、简洁、可执行的回答。"
     "可以说明保存方法、挑选方式、常见做法、营养特点、食材替代和注意事项。"
     "不要编造用户的冰箱库存、家庭成员档案或实时数据；没有实时工具时不要假装知道天气。"
+    "\n\n[菜名标注规则]只要回复中出现具体菜名（例如推荐了菜品、列举了某道菜的做法），"
+    "就必须在回复的最后一行单独输出<dishes>菜名1|菜名2</dishes>，最多3个菜名，用|分隔，"
+    "例如:<dishes>番茄炒蛋|青椒肉丝</dishes>。整条回复没有具体菜名时才允许省略此行。"
+)
+
+_DISH_TAG_REMINDER = (
+    "再次提醒:若本轮回复中出现任何具体菜名，在最后一行单独输出<dishes>菜名1|菜名2</dishes>"
+    "(最多3个,以<dishes>开头、以</dishes>结尾);没有具体菜名则不输出该行。"
 )
 
 
@@ -690,6 +701,94 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+_DISH_TAG_OPEN = "<dishes>"
+_DISH_TAG_CLOSE = "</dishes>"
+
+
+class _DishTagFilter:
+    """流式剥离模型输出的 <dishes>菜名1|菜名2</dishes> 标记行。
+
+    实测模型经常漏写开启标签,因此解析以闭合标签为准:完整行里出现
+    </dishes> 就把该行当标记行吞掉并解析菜名;开启标签存在时同样处理。
+    未换行的尾部先扣住,拼成完整行再判定,流式粒度为按行。
+    """
+
+    def __init__(self) -> None:
+        self.dishes: list[str] = []
+        self._pending = ""  # 尚未见到换行的尾部内容
+        self._holding = False  # 已见开启标签,正在等闭合
+        self._hold_buf = ""
+
+    def _parse_names(self, raw: str) -> None:
+        for part in raw.replace("\n", "|").split("|"):
+            part = part.strip()
+            for sep in (":", "："):
+                if sep in part:
+                    part = part.rsplit(sep, 1)[1].strip()
+            if part:
+                self.dishes.append(part)
+            if len(self.dishes) >= 3:
+                return
+
+    def _consume_line(self, line: str) -> str:
+        """处理一条完整行(含换行),返回应放行的文本。"""
+        if self._holding:
+            if _DISH_TAG_CLOSE in line:
+                names_raw, _, after = line.partition(_DISH_TAG_CLOSE)
+                self._parse_names((self._hold_buf + names_raw).strip())
+                self._hold_buf = ""
+                self._holding = False
+                return after
+            self._hold_buf += line
+            return ""
+        idx = line.find(_DISH_TAG_OPEN)
+        if idx != -1:
+            before = line[:idx]
+            rest = line[idx + len(_DISH_TAG_OPEN) :]
+            end = rest.find(_DISH_TAG_CLOSE)
+            if end != -1:
+                self._parse_names(rest[:end])
+                return before + rest[end + len(_DISH_TAG_CLOSE) :]
+            self._holding = True
+            self._hold_buf = rest
+            return before
+        end = line.find(_DISH_TAG_CLOSE)
+        if end != -1:
+            # 观测到的退化形态:只有"菜名1|菜名2</dishes>"
+            self._parse_names(line[:end])
+            return line[end + len(_DISH_TAG_CLOSE) :]
+        return line
+
+    def feed(self, delta: str) -> str:
+        self._pending += delta
+        out: list[str] = []
+        while "\n" in self._pending:
+            nl = self._pending.find("\n")
+            line = self._pending[: nl + 1]
+            self._pending = self._pending[nl + 1 :]
+            out.append(self._consume_line(line))
+        if self._holding:
+            self._hold_buf += self._pending
+            self._pending = ""
+        return "".join(out)
+
+    def flush(self) -> str:
+        """流结束:最后一行按完整行判定;普通文本放行,残缺标记宽容解析后丢弃。"""
+        line, self._pending = self._pending, ""
+        if self._holding:
+            merged = (self._hold_buf + line).strip()
+            if _DISH_TAG_CLOSE in merged:
+                self._parse_names(merged.split(_DISH_TAG_CLOSE)[0].strip())
+            elif merged:
+                self._parse_names(merged)
+            self._hold_buf = ""
+            self._holding = False
+            return ""
+        if not line:
+            return ""
+        return self._consume_line(line + "\n").rstrip("\n")
+
+
 async def _llm_stream_text(
     prompt_messages: list[dict],
 ) -> AsyncIterator[tuple[str, str]]:
@@ -705,8 +804,53 @@ async def _llm_stream_text(
         yield "__error__", ""
 
 
+_HISTORY_MAX_MESSAGES = 8
+_HISTORY_MAX_CHARS = 4000
+
+
+def _recent_history_messages(
+    session_id: str | None, exclude_message_id: str | None
+) -> list[dict[str, str]]:
+    """多轮上下文:取本会话最近几条历史消息,超预算从最旧的开始丢弃。
+
+    当轮用户消息在调用前已落库,用 exclude_message_id 排除避免重复。
+    """
+    if not session_id:
+        return []
+    with SessionLocal() as session:
+        rows = session.scalars(
+            select(AgentChatMessage)
+            .where(AgentChatMessage.session_id == session_id)
+            .order_by(AgentChatMessage.created_at.desc())
+            .limit(40)
+        ).all()
+    history: list[dict[str, str]] = []
+    for row in rows:
+        if exclude_message_id and row.id == exclude_message_id:
+            continue
+        content = (row.content or "").strip()
+        if not content:
+            continue
+        if row.role == "user":
+            content = _message_without_frontend_context(content)
+            if not content:
+                continue
+        history.append(
+            {"role": "user" if row.role == "user" else "assistant", "content": content}
+        )
+        if len(history) >= _HISTORY_MAX_MESSAGES:
+            break
+    history.reverse()
+    total_chars = sum(len(item["content"]) for item in history)
+    while history and total_chars > _HISTORY_MAX_CHARS:
+        total_chars -= len(history[0]["content"])
+        history.pop(0)
+    return history
+
+
 async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
     settings = get_settings()
+    current_user_message_id: str | None = None
     with SessionLocal() as session:
         if payload.session_id:
             chat_session = session.get(AgentChatSession, payload.session_id)
@@ -720,9 +864,12 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         title = chat_session.title
         if title == "新会话" and payload.message:
             chat_session.title = payload.message[:20]
-        session.add(
-            AgentChatMessage(session_id=session_id, role="user", content=payload.message)
+        current_user_message = AgentChatMessage(
+            session_id=session_id, role="user", content=payload.message
         )
+        session.add(current_user_message)
+        session.flush()
+        current_user_message_id = current_user_message.id
         session.commit()
 
     user_text = _message_without_frontend_context(payload.message)
@@ -749,20 +896,29 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
     if route == "general":
         # 普通话题不读取厨房上下文,不创建规划运行,也不发送 thinking/status/plan。
         text_parts: list[str] = []
+        dish_filter = _DishTagFilter()
         async for kind, delta in _llm_stream_text(
             [
                 {"role": "system", "content": GENERAL_PROMPT},
+                *_recent_history_messages(session_id, current_user_message_id),
                 {"role": "user", "content": user_text},
+                {"role": "system", "content": _DISH_TAG_REMINDER},
             ]
         ):
             if kind == "text" and delta:
-                text_parts.append(delta)
-                yield _sse("text", {"delta": delta})
+                safe = dish_filter.feed(delta)
+                if safe:
+                    text_parts.append(safe)
+                    yield _sse("text", {"delta": safe})
+        tail = dish_filter.flush()
+        if tail:
+            text_parts.append(tail)
+            yield _sse("text", {"delta": tail})
         if not text_parts:
             text_parts = [_fallback_general_text(user_text)]
             yield _sse("text", {"delta": text_parts[0]})
 
-        full_text = "".join(text_parts)
+        full_text = "".join(text_parts).rstrip()
         message_id = None
         with SessionLocal() as session:
             message = AgentChatMessage(
@@ -784,6 +940,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 "needs_input": False,
                 "provider": settings.llm_provider if text_parts else None,
                 "route": "general",
+                "search_queries": dish_filter.dishes,
             },
         )
         return
@@ -791,20 +948,29 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
     if route == "kitchen_qa":
         # 知识问答不读取冰箱/家庭档案,不创建规划运行,也不发送 thinking/status/plan。
         text_parts: list[str] = []
+        dish_filter = _DishTagFilter()
         async for kind, delta in _llm_stream_text(
             [
                 {"role": "system", "content": QA_PROMPT},
+                *_recent_history_messages(session_id, current_user_message_id),
                 {"role": "user", "content": user_text},
+                {"role": "system", "content": _DISH_TAG_REMINDER},
             ]
         ):
             if kind == "text" and delta:
-                text_parts.append(delta)
-                yield _sse("text", {"delta": delta})
+                safe = dish_filter.feed(delta)
+                if safe:
+                    text_parts.append(safe)
+                    yield _sse("text", {"delta": safe})
+        tail = dish_filter.flush()
+        if tail:
+            text_parts.append(tail)
+            yield _sse("text", {"delta": tail})
         if not text_parts:
             text_parts = [_fallback_qa_text(user_text)]
             yield _sse("text", {"delta": text_parts[0]})
 
-        full_text = "".join(text_parts)
+        full_text = "".join(text_parts).rstrip()
         message_id = None
         with SessionLocal() as session:
             message = AgentChatMessage(
@@ -826,6 +992,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 "needs_input": False,
                 "provider": settings.llm_provider if text_parts else None,
                 "route": "kitchen_qa",
+                "search_queries": dish_filter.dishes,
             },
         )
         return
@@ -956,6 +1123,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                         "needs_input": False,
                         "provider": None,
                         "route": "kitchen_recipe",
+                        "search_queries": [fuzzy_query],
                     },
                 )
                 return
@@ -965,6 +1133,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             async for kind, delta in _llm_stream_text(
                 [
                     {"role": "system", "content": _generic_recipe_prompt(dish_name, context)},
+                    *_recent_history_messages(session_id, current_user_message_id),
                     {"role": "user", "content": user_text},
                 ]
             ):
@@ -995,6 +1164,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 "provider": settings.llm_provider if text_parts else None,
                 "route": "kitchen_recipe",
                 "search_query": dish_name,
+                "search_queries": [dish_name],
             })
             return
         if recipe is not None:
@@ -1012,6 +1182,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 async for kind, delta in _llm_stream_text(
                     [
                         {"role": "system", "content": _recipe_qa_prompt(recipe, context, diners)},
+                        *_recent_history_messages(session_id, current_user_message_id),
                         {"role": "user", "content": user_text},
                     ]
                 ):
@@ -1054,6 +1225,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                     "needs_input": False,
                     "provider": settings.llm_provider if text_parts else None,
                     "route": "kitchen_recipe",
+                    "search_queries": [recipe.name],
                 },
             )
             return
