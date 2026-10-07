@@ -11,6 +11,8 @@ import uuid
 from datetime import date
 
 from app.core.config import get_settings
+from app.agent.graph import build_meal_planning_graph
+from app.agent.state import MealPlanningState
 from app.db.models import AgentRun, MealService, ToolTrace
 from app.db.session import SessionLocal
 from app.llm.factory import build_llm_provider
@@ -396,22 +398,33 @@ async def create_run(
         context = load_planning_context(session, workspace_id, site_id, meal_service_id)
 
     provider = build_llm_provider(get_settings())
-    if on_step:
-        on_step("running", "parse_request", "解析人数、预算、点名菜品与忌口")
-    constraints, parse_trace, used_llm = await _parse_constraints_with_llm(
-        provider, request_text, context, on_thinking=on_thinking
-    )
-    if on_step:
-        on_step("done", "parse_request", parse_trace.output_summary)
-    traces, options, warnings, workspace_restrictions = _plan(
-        context, constraints, parse_trace, on_step=on_step
-    )
+
+    # 编排交给 LangGraph 状态图(app/agent/graph.py):节点体复用本模块的
+    # 约束解析与 planning.py 纯函数链,行为与原顺序编排逐行等价。
+    graph = build_meal_planning_graph()
+    initial_state: MealPlanningState = {
+        "workspace_id": workspace_id,
+        "site_id": site_id,
+        "meal_service_id": meal_service_id,
+        "request_text": request_text,
+        "context": context,
+        "provider": provider,
+        "on_step": on_step,
+        "on_thinking": on_thinking,
+    }
+    final_state = await graph.ainvoke(initial_state)
+
+    traces = final_state["tool_trace"]
+    options = final_state["menu_options"]
+    warnings = final_state["warnings"]
+    workspace_restrictions = final_state["workspace_restrictions"]
+    used_llm = final_state["parse_used_llm"]
 
     settings = get_settings()
     run = AgentRunView(
         id=str(uuid.uuid4()),
         status=RunStatus.WAITING_APPROVAL,
-        constraints=constraints,
+        constraints=final_state["constraints"],
         tool_trace=traces,
         options=options,
         warnings=warnings,
