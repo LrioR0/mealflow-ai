@@ -150,3 +150,9 @@ apps/web/dist/
 data/local/
 apps/api/data/
 *.sqlite3.bak-*
+
+# 本机工具与临时产物(不入库)
+.zcode/
+.zcodeignore
+start-dev.bat
+apps/web/public/data/dish-images/
