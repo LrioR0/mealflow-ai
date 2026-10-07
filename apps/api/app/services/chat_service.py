@@ -369,6 +369,58 @@ def _recall_recipes_by_ingredient(
     return items, len(scored)
 
 
+def _name_overlap(query: str, name: str) -> float:
+    """菜名模糊度:字符 2-gram 的重叠率(「番茄炒鸡蛋」vs「番茄炒蛋」≈0.67)。
+
+    短词(单字)返回 0,避免单字误配;无 2-gram 时退化为双向包含判断。
+    """
+    query = query.strip()
+    name = name.strip()
+    if len(query) < 2 or len(name) < 2:
+        return 0.0
+    query_grams = {query[i : i + 2] for i in range(len(query) - 1)}
+    name_grams = {name[i : i + 2] for i in range(len(name) - 1)}
+    union = query_grams | name_grams
+    return len(query_grams & name_grams) / len(union) if union else 0.0
+
+
+def _search_recipes_by_dish(
+    query: str, context: PlanningContext
+) -> tuple[str, list[dict], int]:
+    """按目标菜名三级检索:精准相等 > 模糊(双向包含/2-gram 重叠) > 空手而归。
+
+    返回 (tier, items, total):tier ∈ {"precise", "fuzzy", "none"}。
+    食材相似推荐由调用方在 tier 为 none 时再走 _recall_recipes_by_ingredient 降级。
+    """
+    term = query.strip()
+    if not term:
+        return "none", [], 0
+    expiring = context.expiring_keys(date.today())
+    inv_keys = {line.key for line in context.inventory if line.quantity > 0}
+    key_names = _key_name_map(context)
+
+    def _item(recipe: RecipeContext) -> dict:
+        used, expiring_used, missing = _fridge_usage(recipe, inv_keys, expiring)
+        return _candidate_item(recipe, context, key_names, used, expiring_used, missing)
+
+    precise = [recipe for recipe in context.recipes if recipe.name == term]
+    if precise:
+        return "precise", [_item(r) for r in precise], len(precise)
+    fuzzy: list[tuple[float, RecipeContext]] = []
+    for recipe in context.recipes:
+        name = recipe.name
+        if (term in name or name in term) and min(len(term), len(name)) >= 2:
+            fuzzy.append((1.0, recipe))
+            continue
+        overlap = _name_overlap(term, name)
+        if overlap >= 0.4:
+            fuzzy.append((overlap, recipe))
+    if fuzzy:
+        fuzzy.sort(key=lambda item: item[0], reverse=True)
+        return "fuzzy", [_item(r) for _, r in fuzzy[:6]], len(fuzzy)
+    return "none", [], 0
+
+
 # 家电养护类问题(提到冰箱但问的是机器本身)不进库存菜单,照常落问答
 _INVENTORY_MENU_EXCLUDE_TERMS = (
     "异味", "除味", "除臭", "除霜", "清洁", "清洗", "保养",
@@ -519,7 +571,7 @@ def _generic_recipe_prompt(dish_name: str, context: PlanningContext) -> str:
         "你是家庭厨房助手 Mina。用户想做一道不在本地菜谱库中的菜，请用你的通用知识给出可靠、详细、可操作的做法。"
         "不要生成多个方案，也不要把问题改成配餐规划。回答包含：适合家常制作的食材用量、准备工作、"
         "分步骤烹饪、火候时间、成菜判断，以及针对成员忌口的少放/替换/分装建议。"
-        "过敏原是绝对红线，不能在做法或替代建议中使用。开头简短说明这是通用做法，未使用本地菜谱库。\n\n"
+        "过敏原是绝对红线，不能在做法或替代建议中使用。页面顶部已提示本地菜谱库未收录此菜，直接给出做法即可，不要重复说明来源。\n\n"
         f"菜名：{dish_name}\n"
         f"当前家庭过敏红线：{'；'.join(allergy_lines) or '无'}\n"
         f"当前家庭普通忌口：{'；'.join(dislike_lines) or '无'}"
@@ -1484,7 +1536,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             "search_recipe_candidates",
             "调取本地菜谱库",
             "done",
-            "本地库无直接命中,按食材模糊匹配",
+            "未点名库内菜品,按提取后的关键词三级检索",
         )
 
     if route == "kitchen_inventory":
@@ -1605,35 +1657,57 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
     if route == "kitchen_recipe" or _is_direct_recipe_request(user_text, intent):
         recipe = intent.named_recipes[0] if intent.named_recipes else None
         if recipe is None:
-            # 食材模糊查询:核心词命中配料(如「想吃虾」) → 发候选菜列表,由前端点击展开做法
-            fuzzy_query = _extract_food_query(user_text)
-            yield _status("search_recipe_candidates", "按食材模糊匹配", "running")
-            fuzzy_items, fuzzy_total = _recall_recipes_by_ingredient(fuzzy_query, context)
-            if fuzzy_items:
-                yield _status(
-                    "search_recipe_candidates",
-                    "按食材模糊匹配",
-                    "done",
-                    f"以「{fuzzy_query}」与 {len(context.recipes)} 道库内菜配料双向匹配,命中 {fuzzy_total} 道",
+            # 意图关键词先行:先剥出目标菜名,再按「菜名精准 > 菜名模糊 > 食材相似」
+            # 三级检索,禁止把用户整段原话当检索词丢进菜谱库
+            dish_name = _dish_name_from_text(user_text)
+            yield _status("search_recipe_candidates", "检索菜谱库", "running")
+            tier, items, total = _search_recipes_by_dish(dish_name, context)
+            if tier == "precise":
+                tier_label = f"菜名精准匹配命中 {total} 道"
+            elif tier == "fuzzy":
+                tier_label = f"菜名精准 0 道，菜名模糊匹配命中 {total} 道"
+            else:
+                # 两级菜名检索都落空 → 降级食材相似推荐,并明确告知用户
+                items, total = _recall_recipes_by_ingredient(dish_name, context)
+                tier = "ingredient"
+                tier_label = (
+                    f"菜名精准 0 道，菜名模糊 0 道，"
+                    + f"食材相似命中 {total} 道"
                 )
-                # 合成思考过程:把真实的规则执行步骤讲给用户(本地计算,不做人为延迟)
-                fuzzy_thinking = (
-                    f"【理解需求】从你的话里提取想吃的食材：「{fuzzy_query}」\n"
-                    f"【模糊匹配】与 {len(context.recipes)} 道库内菜的配料双向匹配，命中 {fuzzy_total} 道，主料优先、临期加权\n"
+            yield _status(
+                "search_recipe_candidates",
+                "检索菜谱库",
+                "done",
+                f"关键词「{dish_name}」：{tier_label}",
+            )
+            if items:
+                # 合成思考过程:只写精简推理摘要,不粘贴用户原话
+                recipe_thinking = (
+                    f"【理解需求】提取目标菜名：「{dish_name}」\n"
+                    f"【检索】按 菜名精准 > 菜名模糊 > 食材相似 三级检索：{tier_label}\n"
                     "【标注】库存使用与过敏/忌口冲突只提示不过滤，决定权在你\n"
                 )
-                for chunk in fuzzy_thinking.splitlines():
+                for chunk in recipe_thinking.splitlines():
                     if chunk:
                         yield _sse("thinking", {"delta": chunk + "\n"})
-                lead_text = (
-                    f"为你找到 {len(fuzzy_items)} 道含「{fuzzy_query}」的菜"
-                    + (f"（共 {fuzzy_total} 道，先展示最相关的 {len(fuzzy_items)} 道）" if fuzzy_total > len(fuzzy_items) else "")
-                    + "，点击菜名即可查看按当前人数换算的做法。"
-                    "标红的含你的过敏原、标黄的撞上当前忌口或状态，仅供参考，仍可查看。"
-                )
+                if tier == "ingredient":
+                    lead_text = (
+                        f"本地菜谱库暂未检索到「{dish_name}」，为你推荐含有相关食材的替代菜品。\n\n"
+                        f"根据食材「{dish_name}」检索到 {total} 道相关菜品"
+                        + (f"（先展示最相关的 {len(items)} 道）" if total > len(items) else "")
+                        + "，点击菜名即可查看按当前人数换算的做法。"
+                        "标红的含你的过敏原、标黄的撞上当前忌口或状态，仅供参考，仍可查看。"
+                    )
+                else:
+                    lead_text = (
+                        f"根据关键词「{dish_name}」检索到 {total} 道相关菜谱"
+                        + (f"（共 {total} 道，先展示最相关的 {len(items)} 道）" if total > len(items) else "")
+                        + "，点击菜名即可查看按当前人数换算的做法。"
+                        "标红的含你的过敏原、标黄的撞上当前忌口或状态，仅供参考，仍可查看。"
+                    )
                 yield _sse(
                     "candidates",
-                    {"query": fuzzy_query, "total": fuzzy_total, "items": fuzzy_items},
+                    {"query": dish_name, "total": total, "items": items},
                 )
                 yield _sse("text", {"delta": lead_text})
                 with SessionLocal() as session:
@@ -1641,7 +1715,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                         session_id=session_id,
                         role="assistant",
                         content=lead_text,
-                        thinking_text=fuzzy_thinking,
+                        thinking_text=recipe_thinking,
                         run_id=None,
                     )
                     session.add(message)
@@ -1655,19 +1729,24 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                         "needs_input": False,
                         "provider": None,
                         "route": "kitchen_recipe",
-                        "search_queries": [fuzzy_query],
+                        "search_queries": [dish_name],
                     },
                 )
                 return
             yield _status(
                 "search_recipe_candidates",
-                "按食材模糊匹配",
+                "检索菜谱库",
                 "done",
-                f"库内没有含「{fuzzy_query}」的菜,改用通用做法生成",
+                f"菜名与食材均未检索到「{dish_name}」,改用通用做法生成",
             )
             dish_name = _dish_name_from_text(user_text)
             text_parts: list[str] = []
             thinking_parts: list[str] = []
+            llm_parts: list[str] = []
+            # 顶部明确告知本地库未收录,再进入通用做法生成
+            lead_text = f"本地菜谱库暂未检索到「{dish_name}」。\n\n"
+            yield _sse("text", {"delta": lead_text})
+            text_parts.append(lead_text)
             yield _status("compose_reply", "生成做法", "running")
             async for kind, delta in _llm_stream_text(
                 [
@@ -1681,13 +1760,18 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                     yield _sse("thinking", {"delta": delta})
                 elif kind == "text" and delta:
                     text_parts.append(delta)
+                    llm_parts.append(delta)
                     yield _sse("text", {"delta": delta})
-            full_text = "".join(text_parts) or _fallback_generic_recipe_text(dish_name)
+            full_text = "".join(text_parts)
+            if not llm_parts:
+                fallback_text = _fallback_generic_recipe_text(dish_name)
+                full_text += fallback_text
+                yield _sse("text", {"delta": fallback_text})
             yield _status(
                 "compose_reply",
                 "生成做法",
                 "done",
-                "" if text_parts else "模型暂不可用,已按规则文本回答",
+                "" if llm_parts else "模型暂不可用,已按规则文本回答",
             )
             if not text_parts:
                 yield _sse("text", {"delta": full_text})
