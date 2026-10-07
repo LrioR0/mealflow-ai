@@ -6,11 +6,21 @@ import type { Recipe } from '../types/recipe'
 defineOptions({ name: 'RecipeCard' })
 
 const props = defineProps<{ recipe: Recipe }>()
-const emit = defineEmits<{ (e: 'agent', recipe: Recipe): void }>()
+const emit = defineEmits<{
+  (e: 'agent', recipe: Recipe): void
+  (e: 'open', recipe: Recipe): void
+}>()
 
 const difficultyClass = computed(() => {
   const map: Record<string, string> = { 简单: 'easy', 中等: 'medium', 困难: 'hard' }
   return map[props.recipe.difficulty] ?? 'easy'
+})
+
+// 做法形式徽标:图文步骤优先展示,无步骤但有视频的引导去看视频教程
+const howtoLabel = computed(() => {
+  if (props.recipe.steps.length) return `📄 图文 ${props.recipe.steps.length} 步`
+  if (props.recipe.videoUrl) return '▶ 视频教程'
+  return ''
 })
 
 // CDN 图偶发加载失败时回退到占位块;翻页复用组件换菜谱时重置
@@ -31,7 +41,7 @@ function openVideo() {
 </script>
 
 <template>
-  <article class="recipe-card">
+  <article class="recipe-card" @click="emit('open', props.recipe)">
     <div class="card-media">
       <img
         v-if="showImage"
@@ -52,6 +62,7 @@ function openVideo() {
       <span v-if="recipe.heat !== null" class="heat-chip">{{ recipe.heat }} kcal</span>
       <span class="pop-chip">👍 {{ recipe.likes }} · ☆ {{ recipe.collect }}</span>
     </div>
+    <div v-if="howtoLabel" class="howto-chip">{{ howtoLabel }}</div>
     <p class="card-ingredients" :title="recipe.ingredients.join('、')">
       <small>食材</small>
       <span>{{ recipe.ingredients.join('、') || '—' }}</span>
@@ -60,10 +71,15 @@ function openVideo() {
       <span v-for="tag in recipe.tags" :key="tag">{{ tag }}</span>
     </div>
     <div class="card-actions">
-      <el-button size="small" :disabled="!recipe.videoUrl" :icon="VideoPlay" @click="openVideo">
+      <el-button size="small" :disabled="!recipe.videoUrl" :icon="VideoPlay" @click.stop="openVideo">
         查看原版视频
       </el-button>
-      <el-button size="small" type="primary" :icon="MagicStick" @click="emit('agent', props.recipe)">
+      <el-button
+        size="small"
+        type="primary"
+        :icon="MagicStick"
+        @click.stop="emit('agent', props.recipe)"
+      >
         交给Agent生成定制菜谱
       </el-button>
     </div>
@@ -81,6 +97,7 @@ function openVideo() {
   border-radius: 14px;
   box-shadow: 0 4px 18px rgba(33, 60, 54, 0.04);
   transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  cursor: pointer;
 }
 .recipe-card:hover {
   transform: translateY(-2px);
@@ -159,6 +176,15 @@ function openVideo() {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+.howto-chip {
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: #e7f2ee;
+  color: #0f6b4f;
+  font-size: 11px;
+  font-weight: 600;
 }
 .card-ingredients {
   margin: 0;

@@ -14,6 +14,7 @@ export interface ExtendedRecipeRaw {
   likes?: number
   collect?: number
   image?: string | null
+  steps?: string[]
   [key: string]: unknown
 }
 
@@ -23,6 +24,8 @@ export interface Recipe {
   name: string
   ingredients: string[]
   videoUrl: string | null
+  // 纯 BV 号(供 B 站播放器 iframe 使用),从 bv 字段提取
+  bvid: string | null
   difficulty: string
   tags: string[]
   methods: string[]
@@ -32,4 +35,5 @@ export interface Recipe {
   likes: number
   collect: number
   image: string | null
+  steps: string[]
 }

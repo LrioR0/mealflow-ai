@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 import { ArrowDown, Refresh, Search } from '@element-plus/icons-vue'
 
 import RecipeCard from '../../components/RecipeCard.vue'
+import RecipeDetailDrawer from '../../components/RecipeDetailDrawer.vue'
 import { useAgentHandoffStore } from '../../stores/agentHandoff'
 import {
   CATEGORY_ORDER,
@@ -50,6 +51,15 @@ const selectedIngredients = ref<string[]>([])
 const selectedTools = ref<string[]>([])
 const matchMode = ref<MatchMode>('fuzzy')
 const page2 = ref(1)
+
+// ===== 菜谱详情抽屉 =====
+const detailRecipe = ref<Recipe | null>(null)
+const detailVisible = ref(false)
+
+function openRecipeDetail(recipe: Recipe) {
+  detailRecipe.value = recipe
+  detailVisible.value = true
+}
 
 onMounted(async () => {
   try {
@@ -134,9 +144,18 @@ function clearTab2Selection() {
   selectedTools.value = []
 }
 
-// 智能配餐跳转暂未开放:点击仅提示,后续接入时恢复 agentHandoff 跳转
-function sendRecipeToAgent() {
-  ElMessage.info('该功能未开发,敬请期待 ✨')
+// 把选中的菜谱交给智能配餐 Agent:写入待办文本后跳转,工作台 onActivated 里消费填入输入框
+function sendRecipeToAgent(recipe: Recipe) {
+  const parts = [`我想做【${recipe.name}】（${recipe.category}，${recipe.difficulty}）。`]
+  if (recipe.ingredients.length) {
+    parts.push(`食材：${recipe.ingredients.join('、')}。`)
+  }
+  if (recipe.tools) {
+    parts.push(`可用厨具：${recipe.tools}。`)
+  }
+  parts.push('请结合家庭成员的口味与忌口，给我一套能直接开火的定制做法。')
+  agentHandoff.stage(parts.join(''))
+  void router.push('/admin/agent')
 }
 
 function sendIngredientsToAgent() {
@@ -270,7 +289,7 @@ function sendIngredientsToAgent() {
           </div>
           <div class="result-scroll">
             <div v-if="tab1Paged.length" class="card-grid">
-              <RecipeCard v-for="recipe in tab1Paged" :key="recipe.id" :recipe="recipe" @agent="sendRecipeToAgent" />
+              <RecipeCard v-for="recipe in tab1Paged" :key="recipe.id" :recipe="recipe" @agent="sendRecipeToAgent" @open="openRecipeDetail" />
             </div>
             <div v-else class="state-block">🍳 没有找到匹配的菜谱,试试减少筛选条件或换个关键词</div>
           </div>
@@ -347,7 +366,7 @@ function sendIngredientsToAgent() {
         <div class="result-area">
           <div class="result-scroll">
             <div v-if="tab2Paged.length" class="card-grid">
-              <RecipeCard v-for="recipe in tab2Paged" :key="recipe.id" :recipe="recipe" @agent="sendRecipeToAgent" />
+              <RecipeCard v-for="recipe in tab2Paged" :key="recipe.id" :recipe="recipe" @agent="sendRecipeToAgent" @open="openRecipeDetail" />
             </div>
             <div v-else class="state-block">🍳 没有匹配的菜谱,多勾几种食材或换成模糊匹配试试</div>
           </div>
@@ -364,6 +383,8 @@ function sendIngredientsToAgent() {
         </div>
       </div>
     </div>
+
+    <RecipeDetailDrawer v-model="detailVisible" :recipe="detailRecipe" @agent="sendRecipeToAgent" />
   </section>
 </template>
 

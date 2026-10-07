@@ -63,6 +63,12 @@ function toVideoUrl(bv: unknown): string | null {
   return `https://www.bilibili.com/video/${id}`
 }
 
+// 从 bv 字段提取纯 BV 号,供详情抽屉的 B 站播放器 iframe 使用
+function toBvid(bv: unknown): string | null {
+  const match = String(bv ?? '').match(/BV[0-9A-Za-z]{10}/)
+  return match ? match[0] : null
+}
+
 export function normalizeRecipe(raw: ExtendedRecipeRaw, index: number): Recipe {
   const heat = typeof raw.heat === 'number' && Number.isFinite(raw.heat) ? raw.heat : null
   return {
@@ -70,6 +76,7 @@ export function normalizeRecipe(raw: ExtendedRecipeRaw, index: number): Recipe {
     name: String(raw.name ?? '').trim() || '未命名菜谱',
     ingredients: splitTokens(raw.stuff),
     videoUrl: toVideoUrl(raw.bv),
+    bvid: toBvid(raw.bv),
     difficulty: String(raw.difficulty ?? '').trim(),
     tags: splitTokens(raw.tags),
     methods: splitTokens(raw.methods),
@@ -79,6 +86,7 @@ export function normalizeRecipe(raw: ExtendedRecipeRaw, index: number): Recipe {
     likes: Number(raw.likes) || 0,
     collect: Number(raw.collect) || 0,
     image: typeof raw.image === 'string' && raw.image.trim() ? raw.image.trim() : null,
+    steps: Array.isArray(raw.steps) ? raw.steps.map((s) => String(s).trim()).filter(Boolean) : [],
   }
 }
 
