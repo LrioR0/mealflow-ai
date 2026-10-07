@@ -244,6 +244,10 @@ def _is_direct_recipe_request(text: str, intent: _Intent) -> bool:
 
 
 def _dish_name_from_text(text: str) -> str:
+    # handoff/引用形态:「我想做【麦乐鸡】(荤菜,中等)。食材:…」——【】内是最明确的目标菜名
+    bracket = re.search(r"【([^】]{1,40})】", text)
+    if bracket:
+        return bracket.group(1).strip()
     cleaned = text.strip()
     cleaned = re.sub(r"^(我想吃|我想做|我想要|想吃|想吃点|想做|要做|做个|做一道|来个|来一份)\s*", "", cleaned)
     cleaned = re.sub(r"(怎么做|做法|的做法|给我做法).*?$", "", cleaned).strip(" ，,。！？?!")
@@ -281,6 +285,28 @@ def _extract_food_query(text: str) -> str:
         if cleaned == before:
             break
     return cleaned
+
+
+def _extract_food_terms(text: str, context: PlanningContext) -> list[str]:
+    """提取目标食材列表:handoff 的「食材:A、B。」段优先,其次扫句中出现的库内配料名,
+    最后兜底用剥词结果。供食材相似召回使用,避免拿整段原话当检索词。"""
+    terms: list[str] = []
+    match = re.search(r"食材[::]\s*([^\n。;;]+)", text)
+    if match:
+        for part in re.split(r"[、,，/]+", match.group(1)):
+            part = part.strip()
+            if part and part not in terms:
+                terms.append(part)
+    if not terms:
+        for name in _key_name_map(context).values():
+            if len(name) >= 2 and name in text and name not in terms:
+                terms.append(name)
+    if not terms:
+        # 兜底剥词结果不设长度下限:单字食材(虾/鱼)也是合法检索词
+        stripped = _extract_food_query(text)
+        if stripped:
+            terms.append(stripped)
+    return terms[:4]
 
 
 def _key_name_map(context: PlanningContext) -> dict[str, str]:
@@ -339,27 +365,36 @@ def _candidate_item(
 
 
 def _recall_recipes_by_ingredient(
-    query: str, context: PlanningContext
+    terms: list[str], context: PlanningContext
 ) -> tuple[list[dict], int]:
-    """食材模糊召回:任一配料名与 query 双向包含即命中(虾↔虾仁)。
+    """按目标食材列表相似召回:命中的食材数多的菜排前(鸡肉+鸡蛋都含 > 只含鸡蛋),
+    主料命中与临期食材加权。任一配料名与任一 term 双向包含即命中(虾↔虾仁)。
 
-    主料命中优先、临期食材加权;不做忌口过滤——冲突由 candidates 事件的
-    conflict 字段交给前端标注(展示不隐藏)。返回(前6条, 总命中数)。
+    不做忌口过滤——冲突由 candidates 事件的 conflict 字段交给前端标注(展示不隐藏)。
+    返回(前6条, 总命中数)。
     """
-    term = query.strip()
-    if not term:
+    clean_terms = [t.strip() for t in terms if t.strip()]
+    if not clean_terms:
         return [], 0
     expiring = context.expiring_keys(date.today())
     key_names = _key_name_map(context)
     inv_keys = {line.key for line in context.inventory if line.quantity > 0}
     scored: list[tuple[tuple[int, int, int], RecipeContext, list[str], list[str], list[str]]] = []
     for recipe in context.recipes:
-        hit_lines = [line for line in recipe.ingredients if term in line.name or line.name in term]
+        hit_terms = 0
+        hit_lines: list = []
+        for term in clean_terms:
+            term_lines = [
+                line for line in recipe.ingredients if term in line.name or line.name in term
+            ]
+            if term_lines:
+                hit_terms += 1
+                hit_lines.extend(term_lines)
         if not hit_lines:
             continue
         main_hit = any(not line.optional for line in hit_lines)
         used, expiring_used, missing = _fridge_usage(recipe, inv_keys, expiring)
-        score = (2 if main_hit else 1, 1 if expiring_used else 0, -len(hit_lines))
+        score = (hit_terms, 2 if main_hit else 1, 1 if expiring_used else 0)
         scored.append((score, recipe, used, expiring_used, missing))
     scored.sort(key=lambda item: item[0], reverse=True)
     items = [
@@ -1667,18 +1702,24 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             elif tier == "fuzzy":
                 tier_label = f"菜名精准 0 道，菜名模糊匹配命中 {total} 道"
             else:
-                # 两级菜名检索都落空 → 降级食材相似推荐,并明确告知用户
-                items, total = _recall_recipes_by_ingredient(dish_name, context)
+                # 两级菜名检索都落空 → 降级食材相似推荐,并明确告知用户。
+                # 食材词只从「食材:」段/库内配料名提取,不拿整段原话当检索词
+                food_terms = _extract_food_terms(user_text, context)
+                items, total = _recall_recipes_by_ingredient(food_terms, context)
                 tier = "ingredient"
+                query_label = "、".join(food_terms) if food_terms else dish_name
                 tier_label = (
                     f"菜名精准 0 道，菜名模糊 0 道，"
-                    + f"食材相似命中 {total} 道"
+                    + f"食材(「{query_label}」)相似命中 {total} 道"
                 )
+                search_query = query_label
+            if tier != "ingredient":
+                search_query = dish_name
             yield _status(
                 "search_recipe_candidates",
                 "检索菜谱库",
                 "done",
-                f"关键词「{dish_name}」：{tier_label}",
+                f"关键词「{search_query}」：{tier_label}",
             )
             if items:
                 # 合成思考过程:只写精简推理摘要,不粘贴用户原话
@@ -1693,21 +1734,21 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 if tier == "ingredient":
                     lead_text = (
                         f"本地菜谱库暂未检索到「{dish_name}」，为你推荐含有相关食材的替代菜品。\n\n"
-                        f"根据食材「{dish_name}」检索到 {total} 道相关菜品"
+                        f"根据食材「{search_query}」检索到 {total} 道相关菜品"
                         + (f"（先展示最相关的 {len(items)} 道）" if total > len(items) else "")
                         + "，点击菜名即可查看按当前人数换算的做法。"
                         "标红的含你的过敏原、标黄的撞上当前忌口或状态，仅供参考，仍可查看。"
                     )
                 else:
                     lead_text = (
-                        f"根据关键词「{dish_name}」检索到 {total} 道相关菜谱"
+                        f"根据关键词「{search_query}」检索到 {total} 道相关菜谱"
                         + (f"（共 {total} 道，先展示最相关的 {len(items)} 道）" if total > len(items) else "")
                         + "，点击菜名即可查看按当前人数换算的做法。"
                         "标红的含你的过敏原、标黄的撞上当前忌口或状态，仅供参考，仍可查看。"
                     )
                 yield _sse(
                     "candidates",
-                    {"query": dish_name, "total": total, "items": items},
+                    {"query": search_query, "total": total, "items": items},
                 )
                 yield _sse("text", {"delta": lead_text})
                 with SessionLocal() as session:
@@ -1729,7 +1770,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                         "needs_input": False,
                         "provider": None,
                         "route": "kitchen_recipe",
-                        "search_queries": [dish_name],
+                        "search_queries": [search_query],
                     },
                 )
                 return

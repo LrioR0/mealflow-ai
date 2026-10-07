@@ -722,7 +722,7 @@ function stopGeneration() {
               <!-- 食材模糊查询:候选菜列表(仅标注忌口/过敏,不过滤),点击展开做法 -->
               <div v-if="bubble.candidates?.length" class="candidate-card">
                 <div class="candidate-card-head">
-                  <strong>含「{{ bubble.candidatesQuery }}」的菜</strong>
+                  <strong>与「{{ (bubble.candidatesQuery ?? '').slice(0, 30) }}」相关的菜谱</strong>
                   <small>共 {{ bubble.candidates.length }} 道 · 点击查看做法</small>
                 </div>
                 <div class="candidate-items">
