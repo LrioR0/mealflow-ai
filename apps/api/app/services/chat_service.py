@@ -21,7 +21,12 @@ from app.db.models import AgentChatMessage, AgentChatSession, AgentRun, Ingredie
 from app.db.session import SessionLocal
 from app.llm.factory import build_llm_provider
 from app.schemas.agent import AgentRunView, MenuOption, PlanningConstraints
-from app.schemas.chat import ChatMessageView, ChatSessionView, ChatStreamRequest
+from app.schemas.chat import (
+    ChatMessageView,
+    ChatSessionSummary,
+    ChatSessionView,
+    ChatStreamRequest,
+)
 from app.services import agent_service, planning
 from app.services.context_loader import (
     MemberConstraint,
@@ -1006,7 +1011,9 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         session_id = chat_session.id
         title = chat_session.title
         if title == "新会话" and payload.message:
-            chat_session.title = payload.message[:20]
+            # 标题取用户输入主行,剥掉前端附带的 [本次用餐…] 上下文行再截断
+            main_line = payload.message.split("\n")[0].strip()
+            chat_session.title = main_line[:20] if main_line else "新会话"
         current_user_message = AgentChatMessage(
             session_id=session_id, role="user", content=payload.message
         )
@@ -1280,6 +1287,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 else "候选菜无忌口/过敏冲突,可以放心选"
             ),
         )
+        thinking_log = ""
         if menu_items:
             today = date.today()
             expiring_names = sorted(
@@ -1289,13 +1297,17 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             )
             in_stock = sum(1 for line in context.inventory if line.quantity > 0)
             # 合成思考过程:真实的库存读取与排序依据(本地计算,不做人为延迟)
-            for chunk in (
+            inventory_thinking = (
                 f"【读取冰箱】{in_stock} 种食材在库"
-                + (f"，其中 {'、'.join(expiring_names)} {len(expiring_names)} 项临期" if expiring_names else ""),
-                f"【召回排序】按「临期使用数 → 库存覆盖度 → 用料数」从 {menu_total} 道库内菜挑出 {len(menu_items)} 道",
-                "【忌口检查】冲突只标注不过滤，决定权在你",
-            ):
-                yield _sse("thinking", {"delta": chunk + "\n"})
+                + (f"，其中 {'、'.join(expiring_names)} {len(expiring_names)} 项临期" if expiring_names else "")
+                + "\n"
+                + f"【召回排序】按「临期使用数 → 库存覆盖度 → 用料数」从 {menu_total} 道库内菜挑出 {len(menu_items)} 道\n"
+                + "【忌口检查】冲突只标注不过滤，决定权在你\n"
+            )
+            thinking_log = inventory_thinking
+            for chunk in inventory_thinking.splitlines():
+                if chunk:
+                    yield _sse("thinking", {"delta": chunk + "\n"})
             stock_names = [
                 f"{line.name}（临期）" if line.key in context.expiring_keys(today) else line.name
                 for line in context.inventory
@@ -1325,7 +1337,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 session_id=session_id,
                 role="assistant",
                 content=lead_text,
-                thinking_text=None,
+                thinking_text=thinking_log or None,
                 run_id=None,
             )
             session.add(message)
@@ -1358,12 +1370,14 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                     f"以「{fuzzy_query}」与 {len(context.recipes)} 道库内菜配料双向匹配,命中 {fuzzy_total} 道",
                 )
                 # 合成思考过程:把真实的规则执行步骤讲给用户(本地计算,不做人为延迟)
-                for chunk in (
-                    f"【理解需求】从你的话里提取想吃的食材：「{fuzzy_query}」",
-                    f"【模糊匹配】与 {len(context.recipes)} 道库内菜的配料双向匹配，命中 {fuzzy_total} 道，主料优先、临期加权",
-                    "【标注】库存使用与过敏/忌口冲突只提示不过滤，决定权在你",
-                ):
-                    yield _sse("thinking", {"delta": chunk + "\n"})
+                fuzzy_thinking = (
+                    f"【理解需求】从你的话里提取想吃的食材：「{fuzzy_query}」\n"
+                    f"【模糊匹配】与 {len(context.recipes)} 道库内菜的配料双向匹配，命中 {fuzzy_total} 道，主料优先、临期加权\n"
+                    "【标注】库存使用与过敏/忌口冲突只提示不过滤，决定权在你\n"
+                )
+                for chunk in fuzzy_thinking.splitlines():
+                    if chunk:
+                        yield _sse("thinking", {"delta": chunk + "\n"})
                 lead_text = (
                     f"为你找到 {len(fuzzy_items)} 道含「{fuzzy_query}」的菜"
                     + (f"（共 {fuzzy_total} 道，先展示最相关的 {len(fuzzy_items)} 道）" if fuzzy_total > len(fuzzy_items) else "")
@@ -1380,7 +1394,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                         session_id=session_id,
                         role="assistant",
                         content=lead_text,
-                        thinking_text=None,
+                        thinking_text=fuzzy_thinking,
                         run_id=None,
                     )
                     session.add(message)
@@ -1564,3 +1578,45 @@ def get_session_view(session_id: str) -> ChatSessionView | None:
                 for row in rows
             ],
         )
+
+
+def delete_session(session_id: str) -> bool:
+    """删除会话及其全部消息;会话不存在返回 False。"""
+    with SessionLocal() as session:
+        chat_session = session.get(AgentChatSession, session_id)
+        if chat_session is None:
+            return False
+        session.query(AgentChatMessage).filter(
+            AgentChatMessage.session_id == session_id
+        ).delete(synchronize_session=False)
+        session.delete(chat_session)
+        session.commit()
+        return True
+
+
+def list_sessions(workspace_id: str, limit: int = 30) -> list[ChatSessionSummary]:
+    """会话列表:按最近更新倒序,只回摘要不含消息体;空会话(无消息)不展示。"""
+    with SessionLocal() as session:
+        rows = session.scalars(
+            select(AgentChatSession)
+            .where(AgentChatSession.workspace_id == workspace_id)
+            .order_by(AgentChatSession.updated_at.desc())
+            .limit(limit * 2)
+        ).all()
+        summaries: list[ChatSessionSummary] = []
+        for row in rows:
+            has_message = session.scalar(
+                select(AgentChatMessage.id).where(AgentChatMessage.session_id == row.id).limit(1)
+            )
+            if has_message is None:
+                continue
+            summaries.append(
+                ChatSessionSummary(
+                    session_id=row.id,
+                    title=row.title,
+                    updated_at=row.updated_at.isoformat(),
+                )
+            )
+            if len(summaries) >= limit:
+                break
+        return summaries

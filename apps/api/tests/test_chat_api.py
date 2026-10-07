@@ -279,6 +279,48 @@ async def test_inventory_menu_ranks_expiring_first() -> None:
     assert _single(events, "done")["route"] == "kitchen_recipe"
 
 
+async def test_list_sessions_returns_recent() -> None:
+    """会话列表:对话后可列出,标题取首条消息前20字,按最近更新倒序,空会话不出现。"""
+    client = await _client()
+    async with client:
+        events = await _stream(client, "明天中午我俩想吃豆角焖面,预算 60 块")
+        session_id = _single(events, "done")["session_id"]
+        await _stream(client, "那做法详细一点")
+        # 再造一个空会话(只有一条 user 消息也算有消息;真正空会话无法从接口造,直接验列表内容)
+        sessions_response = await client.get("/api/v1/agent/chat/sessions")
+
+    assert sessions_response.status_code == 200
+    sessions = sessions_response.json()
+    assert isinstance(sessions, list) and sessions
+    target = next(item for item in sessions if item["session_id"] == session_id)
+    assert target["title"] == "明天中午我俩想吃豆角焖面,预算 60 块"[:20]
+    assert target["updated_at"]
+    # 倒序:第一条应为最近更新的会话
+    updated = [item["updated_at"] for item in sessions]
+    assert updated == sorted(updated, reverse=True)
+
+
+async def test_delete_session_removes_messages() -> None:
+    """删除会话:消息一并删除,原会话 404,列表不含,重复删除 404。"""
+    client = await _client()
+    async with client:
+        events = await _stream(client, "明天中午我俩想吃豆角焖面,预算 60 块")
+        session_id = _single(events, "done")["session_id"]
+
+        delete_response = await client.delete(f"/api/v1/agent/chat/{session_id}")
+        assert delete_response.status_code == 200
+        assert delete_response.json() == {"deleted": True}
+
+        gone = await client.get(f"/api/v1/agent/chat/{session_id}")
+        assert gone.status_code == 404
+
+        listed = await client.get("/api/v1/agent/chat/sessions")
+        assert all(item["session_id"] != session_id for item in listed.json())
+
+        repeat = await client.delete(f"/api/v1/agent/chat/{session_id}")
+        assert repeat.status_code == 404
+
+
 async def test_session_restore_after_chat() -> None:
     """会话可恢复:对话后 GET 会话,消息(含用户与助手)持久化。"""
     client = await _client()

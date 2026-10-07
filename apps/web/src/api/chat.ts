@@ -51,6 +51,38 @@ export interface ChatStreamRequest {
 
 export interface ChatPlanEvent extends AgentRun {}
 
+export interface ChatMessageView {
+  id: string
+  role: 'user' | 'assistant' | string
+  content: string
+  thinking_text: string | null
+  run_id: string | null
+}
+
+export interface ChatSessionView {
+  session_id: string
+  title: string
+  messages: ChatMessageView[]
+}
+
+export interface ChatSessionSummary {
+  session_id: string
+  title: string
+  updated_at: string
+}
+
+export function fetchChatSessions(workspaceId = 'home-workspace'): Promise<ChatSessionSummary[]> {
+  return apiRequest(`/agent/chat/sessions?workspace_id=${encodeURIComponent(workspaceId)}`)
+}
+
+export function fetchChatSession(sessionId: string): Promise<ChatSessionView> {
+  return apiRequest(`/agent/chat/${sessionId}`)
+}
+
+export function deleteChatSession(sessionId: string): Promise<{ deleted: boolean }> {
+  return apiRequest(`/agent/chat/${sessionId}`, { method: 'DELETE' })
+}
+
 export function fetchHousehold(): Promise<Household> {
   return apiRequest('/household')
 }

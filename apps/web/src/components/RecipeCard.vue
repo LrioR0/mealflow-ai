@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { MagicStick, VideoPlay } from '@element-plus/icons-vue'
 import type { Recipe } from '../types/recipe'
 
@@ -13,6 +13,16 @@ const difficultyClass = computed(() => {
   return map[props.recipe.difficulty] ?? 'easy'
 })
 
+// CDN 图偶发加载失败时回退到占位块;翻页复用组件换菜谱时重置
+const imageFailed = ref(false)
+watch(
+  () => props.recipe.id,
+  () => {
+    imageFailed.value = false
+  },
+)
+const showImage = computed(() => props.recipe.image !== null && !imageFailed.value)
+
 function openVideo() {
   if (props.recipe.videoUrl) {
     window.open(props.recipe.videoUrl, '_blank', 'noopener')
@@ -22,6 +32,17 @@ function openVideo() {
 
 <template>
   <article class="recipe-card">
+    <div class="card-media">
+      <img
+        v-if="showImage"
+        :src="recipe.image!"
+        :alt="recipe.name"
+        loading="lazy"
+        referrerpolicy="no-referrer"
+        @error="imageFailed = true"
+      />
+      <div v-else class="media-fallback" aria-hidden="true">🍳</div>
+    </div>
     <div class="card-topline">
       <h3 :title="recipe.name">{{ recipe.name }}</h3>
       <span class="category-chip">{{ recipe.category }}</span>
@@ -65,6 +86,28 @@ function openVideo() {
   transform: translateY(-2px);
   border-color: var(--green-2);
   box-shadow: 0 12px 30px rgba(15, 76, 69, 0.1);
+}
+.card-media {
+  margin: -16px -16px 0;
+  height: 148px;
+  overflow: hidden;
+  border-radius: 14px 14px 0 0;
+  background: #f1f3ef;
+}
+.card-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.media-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 34px;
+  background: linear-gradient(135deg, #e7f2ee 0%, #f6f4ec 60%, #fdf3e0 100%);
 }
 .card-topline {
   display: flex;

@@ -1,5 +1,5 @@
 // 懒人宝典:扩展菜谱库的原始结构与前端规范化结构
-// 原始数据来源:apps/web/public/data/recipes_extended.json(B站菜谱视频库导出)
+// 数据来源:apps/web/public/data/recipes_merged.json(B站菜谱库 + HowToCook 合并清洗版,见 scripts/merge_recipes.py)
 
 export interface ExtendedRecipeRaw {
   name?: string
@@ -13,6 +13,7 @@ export interface ExtendedRecipeRaw {
   heat?: number
   likes?: number
   collect?: number
+  image?: string | null
   [key: string]: unknown
 }
 
@@ -30,4 +31,5 @@ export interface Recipe {
   heat: number | null
   likes: number
   collect: number
+  image: string | null
 }

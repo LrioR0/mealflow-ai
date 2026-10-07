@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { generateProcurement } from '../../composables/procurement'
 import { useAgentHandoffStore } from '../../stores/agentHandoff'
 
-import { Check, User } from '@element-plus/icons-vue'
+import { ArrowDown, Check, CopyDocument, Delete, User } from '@element-plus/icons-vue'
 
 import {
   conversationStarted,
@@ -13,9 +13,13 @@ import {
 
 import {
   createHouseholdEvent,
+  deleteChatSession,
+  fetchChatSession,
+  fetchChatSessions,
   fetchHousehold,
   fetchRecipeDetail,
   streamChat,
+  type ChatSessionSummary,
   type Household,
   type RecipeDetail,
 } from '../../api/chat'
@@ -57,9 +61,9 @@ interface ChatBubble {
   error: string
   stopped?: boolean
   searchQuery?: string
-  searchQueries?: string[]
   candidates?: CandidateItem[]
   candidatesQuery?: string
+  thinkingOpen?: boolean
 }
 
 const STEP_LABELS: Record<string, string> = {
@@ -93,6 +97,7 @@ watch(
 const input = ref('')
 const sending = ref(false)
 const currentAbort = ref<AbortController | null>(null)
+const copiedId = ref<string | null>(null)
 const sessionId = ref<string | null>(null)
 const listEl = ref<HTMLElement | null>(null)
 const recipeCache = ref<Record<string, RecipeDetail>>({})
@@ -103,7 +108,128 @@ const dinerPickerOpen = ref(false)
 const dinerSelectorEl = ref<HTMLElement | null>(null)
 const knownMemberIds = new Set<string>()
 const CHAT_SCROLL_KEY = 'mealflow_agent_chat_scroll_top_v1'
+const CHAT_SESSION_KEY = 'mealflow_agent_chat_session_id_v1'
 const savedChatScrollTop = ref(0)
+
+// ===== 会话管理:历史下拉 + 新建对话 + 刷新恢复 =====
+const sessionMenuOpen = ref(false)
+const sessionMenuEl = ref<HTMLElement | null>(null)
+const sessions = ref<ChatSessionSummary[]>([])
+const sessionsLoading = ref(false)
+const restoring = ref(false)
+
+const activeSessionTitle = computed(
+  () => sessions.value.find((item) => item.session_id === sessionId.value)?.title ?? '当前对话',
+)
+
+function relativeTime(iso: string): string {
+  const delta = Date.now() - new Date(iso).getTime()
+  if (Number.isNaN(delta)) return ''
+  const minutes = Math.floor(delta / 60000)
+  if (minutes < 1) return '刚刚'
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 小时前`
+  return `${Math.floor(hours / 24)} 天前`
+}
+
+async function loadSessions() {
+  sessionsLoading.value = true
+  try {
+    sessions.value = await fetchChatSessions()
+  } catch {
+    // 列表加载失败不打断对话,下拉里显示空态
+  } finally {
+    sessionsLoading.value = false
+  }
+}
+
+function toggleSessionMenu() {
+  sessionMenuOpen.value = !sessionMenuOpen.value
+  if (sessionMenuOpen.value) void loadSessions()
+}
+
+// 新建对话:界面清空,旧会话保留在库里,可从下拉重新进入
+function startNewSession() {
+  if (sending.value || restoring.value) return
+  currentAbort.value?.abort()
+  sessionId.value = null
+  sessionStorage.removeItem(CHAT_SESSION_KEY)
+  messages.value = []
+  expandedDish.value = null
+  followLatest.value = true
+  sessionMenuOpen.value = false
+}
+
+// 删除历史会话:确认后删除;若删的是当前打开的会话,界面同步清空
+async function removeSession(item: ChatSessionSummary) {
+  if (sending.value || restoring.value) return
+  try {
+    await ElMessageBox.confirm(`删除「${item.title}」？删除后不可恢复。`, '删除对话', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch {
+    return // 用户取消
+  }
+  try {
+    await deleteChatSession(item.session_id)
+    sessions.value = sessions.value.filter((entry) => entry.session_id !== item.session_id)
+    if (sessionId.value === item.session_id) {
+      currentAbort.value?.abort()
+      sessionId.value = null
+      sessionStorage.removeItem(CHAT_SESSION_KEY)
+      messages.value = []
+      expandedDish.value = null
+    }
+    ElMessage.success('对话已删除')
+  } catch {
+    ElMessage.error('删除失败，请重试')
+  }
+}
+
+// 恢复历史会话:回放消息(思考过程默认收起,可展开回看)
+async function restoreSession(id: string) {
+  if (sending.value || restoring.value || id === sessionId.value) {
+    sessionMenuOpen.value = false
+    return
+  }
+  restoring.value = true
+  sessionMenuOpen.value = false
+  try {
+    const view = await fetchChatSession(id)
+    currentAbort.value?.abort()
+    sessionId.value = view.session_id
+    sessionStorage.setItem(CHAT_SESSION_KEY, view.session_id)
+    expandedDish.value = null
+    followLatest.value = true
+    messages.value = view.messages.map((message) =>
+      reactive({
+        id: message.id,
+        role: message.role === 'user' ? ('user' as const) : ('assistant' as const),
+        content: message.content,
+        thinking: message.thinking_text ?? '',
+        thinkingDone: true,
+        thinkingOpen: false,
+        steps: [],
+        plan: null,
+        selectedStrategy: '',
+        questions: [],
+        streaming: false,
+        error: '',
+      }),
+    )
+    void nextTick(() => {
+      const list = listEl.value
+      if (list) list.scrollTop = list.scrollHeight
+    })
+  } catch {
+    ElMessage.error('会话恢复失败，请重试')
+  } finally {
+    restoring.value = false
+  }
+}
 
 const selectedDiners = computed(() =>
   (household.value?.members ?? []).filter((member) => selectedDinerIds.value.includes(member.user_id)),
@@ -159,6 +285,11 @@ onActivated(() => {
     ElMessage({ message: '已把需求填入输入框,确认后发送即可', type: 'success', grouping: true })
   }
   void loadHousehold()
+  // 刷新后组件重建:从 sessionStorage 恢复当前会话(KeepAlive 内切换页面则 ref 还在,跳过)
+  if (!sessionId.value && !messages.value.length) {
+    const saved = sessionStorage.getItem(CHAT_SESSION_KEY)
+    if (saved) void restoreSession(saved)
+  }
   restoreChatScroll()
 })
 onDeactivated(rememberChatScroll)
@@ -175,6 +306,9 @@ function onDocumentPointerDown(event: PointerEvent) {
   const target = event.target as Node | null
   if (dinerPickerOpen.value && target && !dinerSelectorEl.value?.contains(target)) {
     dinerPickerOpen.value = false
+  }
+  if (sessionMenuOpen.value && target && !sessionMenuEl.value?.contains(target)) {
+    sessionMenuOpen.value = false
   }
 }
 
@@ -388,6 +522,7 @@ async function send(preset?: string) {
       if (event.event === 'thinking') {
         assistant.thinking += String(event.data.delta ?? '')
         assistant.thinkingDone = false
+        assistant.thinkingOpen = true // 流式期间自动展开,实时看思维链
         clearTimeout(thinkingIdleTimer)
         thinkingIdleTimer = setTimeout(() => {
           assistant.thinkingDone = true
@@ -429,13 +564,11 @@ async function send(preset?: string) {
       } else if (event.event === 'done') {
         assistant.streaming = false
         assistant.thinkingDone = true
+        // 菜单列表的思考过程保持展开(决策透明);其余分支收起,答案为主
+        assistant.thinkingOpen = Boolean(assistant.candidates?.length)
         sessionId.value = (event.data.session_id as string) ?? sessionId.value
+        if (sessionId.value) sessionStorage.setItem(CHAT_SESSION_KEY, sessionId.value)
         assistant.searchQuery = typeof event.data.search_query === 'string' ? event.data.search_query : undefined
-        assistant.searchQueries = Array.isArray(event.data.search_queries)
-          ? event.data.search_queries.map((query) => String(query)).filter(Boolean)
-          : assistant.searchQuery
-            ? [assistant.searchQuery]
-            : undefined
       }
       scrollBottom()
     }
@@ -464,11 +597,70 @@ function stopGeneration() {
   currentAbort.value?.abort()
 }
 
+// 复制消息原文;按钮上的「已复制」反馈短暂显示
+async function copyMessage(bubble: ChatBubble) {
+  try {
+    await navigator.clipboard.writeText(bubble.content)
+    copiedId.value = bubble.id
+    setTimeout(() => {
+      if (copiedId.value === bubble.id) copiedId.value = null
+    }, 1500)
+  } catch {
+    ElMessage.error('复制失败，请手动选择文本复制')
+  }
+}
+
 </script>
 
 <template>
   <section class="workbench">
     <div class="chat-panel">
+      <!-- 会话栏:新建对话 + 历史会话下拉 -->
+      <div class="session-bar">
+        <button class="new-session-btn" type="button" :disabled="sending || restoring" @click="startNewSession">
+          ＋ 新建对话
+        </button>
+        <div ref="sessionMenuEl" class="session-menu" :class="{ open: sessionMenuOpen }">
+          <button class="session-menu-trigger" type="button" @click.stop="toggleSessionMenu">
+            <span class="session-menu-title">{{ activeSessionTitle }}</span>
+            <span class="session-menu-chevron">{{ sessionMenuOpen ? '⌃' : '⌄' }}</span>
+          </button>
+          <div v-if="sessionMenuOpen" class="session-menu-panel" @pointerdown.stop>
+            <div class="session-menu-head">
+              <strong>历史对话</strong>
+              <small>点击恢复,最近优先</small>
+            </div>
+            <div v-if="sessionsLoading" class="session-menu-empty">加载中…</div>
+            <div v-else-if="!sessions.length" class="session-menu-empty">暂无历史会话</div>
+            <div
+              v-for="item in sessions"
+              v-else
+              :key="item.session_id"
+              class="session-menu-row"
+            >
+              <button
+                class="session-menu-item"
+                :class="{ active: item.session_id === sessionId }"
+                type="button"
+                @click="restoreSession(item.session_id)"
+              >
+                <span class="session-item-title">{{ item.title }}</span>
+                <small class="session-item-time">{{ relativeTime(item.updated_at) }}</small>
+              </button>
+              <button
+                class="session-delete-btn"
+                type="button"
+                title="删除对话"
+                :disabled="sending || restoring"
+                @click.stop="removeSession(item)"
+              >
+                <el-icon><Delete /></el-icon>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 消息流:对话即工作台 -->
       <div ref="listEl" class="chat-list" @scroll="onListScroll">
         <div v-if="!messages.length" class="chat-hero">
@@ -485,21 +677,32 @@ function stopGeneration() {
         </div>
 
         <template v-for="bubble in messages" :key="bubble.id">
-          <!-- 用户消息:右对齐气泡 -->
+          <!-- 用户消息:右对齐气泡,悬浮渐显复制按钮 -->
           <div v-if="bubble.role === 'user'" class="msg-row user">
             <div class="user-bubble">{{ bubble.content }}</div>
+            <button class="copy-btn" type="button" title="复制内容" @click="copyMessage(bubble)">
+              <el-icon><component :is="copiedId === bubble.id ? Check : CopyDocument" /></el-icon>
+              {{ copiedId === bubble.id ? '已复制' : '复制' }}
+            </button>
           </div>
 
           <!-- Agent 消息:思考直播 → 步骤 → 回答 → 方案卡 → 反问 -->
           <div v-else class="msg-row assistant">
             <div class="assistant-block">
-              <!-- 思考中:spinner + 流光文案,让用户知道模型正在思考;正文到达后消失 -->
-              <div v-if="bubble.streaming" class="thinking-line">
-                <span v-if="!bubble.content && !bubble.steps.length" class="spinner"></span>
-                <span
-                  v-if="bubble.thinking && !bubble.content && !bubble.thinkingDone && !allStepsDone(bubble)"
-                  class="thinking-live"
-                >✦ 正在分析这顿饭的安排</span>
+              <div
+                v-if="bubble.streaming && !bubble.thinking && !bubble.steps.length"
+                class="thinking-line"
+              >
+                <span class="spinner"></span>
+              </div>
+
+              <!-- 思考过程:LLM 为真实思维链,规则分支为真实执行步骤;流式自动展开,完成收起(菜单列表保持展开) -->
+              <div v-if="bubble.thinking" class="thinking-box">
+                <button class="thinking-toggle" type="button" @click="bubble.thinkingOpen = !bubble.thinkingOpen">
+                  <span>{{ bubble.streaming && !bubble.thinkingDone ? '✦ 正在思考' : '✦ 思考过程' }}</span>
+                  <el-icon class="thinking-chev" :class="{ open: bubble.thinkingOpen }"><ArrowDown /></el-icon>
+                </button>
+                <pre v-show="bubble.thinkingOpen" class="thinking-text">{{ bubble.thinking }}</pre>
               </div>
 
               <!-- 思索步骤只在流式期间展示,回答完成后全部路由隐藏 -->
@@ -604,15 +807,9 @@ function stopGeneration() {
                 </div>
               </div>
 
-              <div v-if="bubble.searchQueries?.length && !bubble.streaming" class="external-recipe">
-                <a
-                  v-for="query in bubble.searchQueries"
-                  :key="query"
-                  :href="`https://www.xiachufang.com/search/?keyword=${encodeURIComponent(query)}`"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  去下厨房搜索「{{ query }}」↗
+              <div v-if="bubble.searchQuery && !bubble.streaming" class="external-recipe">
+                <a :href="`https://www.xiachufang.com/search/?keyword=${encodeURIComponent(bubble.searchQuery)}`" target="_blank" rel="noopener noreferrer">
+                  去下厨房搜索「{{ bubble.searchQuery }}」↗
                 </a>
                 <small>外部菜谱为通用做法，未适配你的忌口与体质，请自行调整。</small>
               </div>
@@ -745,6 +942,12 @@ function stopGeneration() {
                 </el-button>
               </div>
             </div>
+
+            <!-- 悬浮渐显的复制按钮:渐变出现,不突兀 -->
+            <button class="copy-btn" type="button" title="复制内容" @click="copyMessage(bubble)">
+              <el-icon><component :is="copiedId === bubble.id ? Check : CopyDocument" /></el-icon>
+              {{ copiedId === bubble.id ? '已复制' : '复制' }}
+            </button>
           </div>
         </template>
       </div>
@@ -828,6 +1031,138 @@ function stopGeneration() {
   gap: 0.7rem;
   min-height: 0;
 }
+/* ===== 会话栏:新建 + 历史下拉(diner-selector 同语言) ===== */
+.session-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.new-session-btn {
+  flex-shrink: 0;
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--green);
+  font-size: 12.5px;
+  font-weight: 650;
+  transition: 0.15s ease;
+}
+.new-session-btn:hover:not(:disabled) {
+  border-color: var(--green-2);
+  transform: translateY(-1px);
+}
+.new-session-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.session-menu { position: relative; flex: 1; min-width: 0; }
+.session-menu-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.session-menu-trigger:hover { border-color: var(--green-2); }
+.session-menu.open .session-menu-trigger { border-color: var(--green-2); }
+.session-menu-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.session-menu-chevron { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+.session-menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 14px 38px rgba(33, 60, 54, 0.13);
+}
+.session-menu-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 4px 8px 8px;
+  border-bottom: 1px solid #eef2ef;
+  margin-bottom: 4px;
+}
+.session-menu-head strong { font-size: 12.5px; color: var(--ink); }
+.session-menu-head small { color: var(--muted); font-size: 11px; }
+.session-menu-empty {
+  padding: 18px 8px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.session-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.session-menu-row .session-menu-item { flex: 1; min-width: 0; }
+.session-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
+.session-menu-item:hover { background: #f1f7f3; }
+.session-menu-item.active { background: #e7f2ee; }
+.session-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--ink);
+}
+.session-menu-item.active .session-item-title { color: var(--green); font-weight: 650; }
+.session-item-time { flex-shrink: 0; color: var(--muted); font-size: 11px; }
+/* 悬浮渐显的删除小按钮(与消息复制按钮同一动画语言) */
+.session-delete-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-right: 4px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateX(3px);
+  transition: opacity 0.22s ease, transform 0.22s ease, color 0.15s ease, background 0.15s ease;
+}
+.session-menu-row:hover .session-delete-btn {
+  opacity: 1;
+  transform: translateX(0);
+}
+.session-delete-btn:hover:not(:disabled) { background: #fdeceb; color: #a43c36; }
+.session-delete-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 .household-strip {
   display: flex;
   align-items: center;
@@ -896,6 +1231,30 @@ function stopGeneration() {
 .hero-chips .el-button:hover { border-color: var(--green-2); background: #f3f8f5; }
 .chip-icon { margin-right: 4px; color: var(--gold); }
 .msg-row { display: flex; }
+/* 悬浮渐显的复制按钮:透明+下移态过渡到实位,不突兀 */
+.copy-btn {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 3px;
+  padding: 2.5px 9px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 0.22s ease, transform 0.22s ease, color 0.15s ease, background 0.15s ease;
+}
+.msg-row:hover .copy-btn {
+  opacity: 1;
+  transform: translateY(0);
+}
+.copy-btn:hover { background: #eef4f0; color: var(--green-2); }
+.msg-row.user .copy-btn { align-self: flex-end; }
 .stopped-note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .msg-row.user { justify-content: flex-end; }
 .user-bubble {
@@ -917,6 +1276,38 @@ function stopGeneration() {
   color: #7a8a86;
 }
 .thinking-line.done { color: #9aa8a4; }
+.thinking-box {
+  margin-bottom: 0.5rem;
+  font-size: 12.5px;
+  color: #7a8a86;
+}
+.thinking-chev {
+  margin-left: 4px;
+  vertical-align: -2px;
+  transition: transform 0.18s ease;
+}
+.thinking-chev.open { transform: rotate(180deg); }
+.thinking-toggle {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.thinking-toggle:hover { color: #1f7a6d; }
+.thinking-text {
+  white-space: pre-wrap;
+  opacity: 0.75;
+  max-height: 110px;
+  overflow-y: auto;
+  border-left: 2px solid #d8e4e0;
+  padding-left: 0.55rem;
+  margin-top: 0.35rem;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 0.95; } }
 .spinner {
   display: inline-block;
   width: 13px;
@@ -1002,10 +1393,10 @@ function stopGeneration() {
 .step-detail { color: #8ba39d; }
 .assistant-text { line-height: 1.75; font-size: 14.5px; }
 .assistant-text :deep(strong) { color: var(--green); font-weight: 750; }
-.external-recipe { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-top: 10px; padding: 10px 12px; border: 1px solid #dce9e3; border-radius: 10px; background: #f7fbf8; }
+.external-recipe { display: grid; gap: 4px; margin-top: 10px; padding: 10px 12px; border: 1px solid #dce9e3; border-radius: 10px; background: #f7fbf8; }
 .external-recipe a { color: var(--green); font-size: 13px; font-weight: 700; text-decoration: none; }
 .external-recipe a:hover { text-decoration: underline; }
-.external-recipe small { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+.external-recipe small { color: var(--muted); font-size: 11px; }
 .chip-row { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.6rem; }
 .plan-card {
   margin-top: 0.8rem;
