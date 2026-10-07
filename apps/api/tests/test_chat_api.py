@@ -12,6 +12,8 @@ from app.services.chat_service import (
     _fallback_route,
     _filter_constraints,
     _format_warning_block,
+    _looks_like_inventory_menu,
+    _wants_non_library_recipe,
 )
 from app.services.context_loader import InventoryLine, MemberConstraint, PlanningContext
 
@@ -31,13 +33,18 @@ def _parse_sse_blocks(blocks: list[str]) -> list[tuple[str, dict]]:
     return events
 
 
-async def _stream(client: AsyncClient, message: str) -> list[tuple[str, dict]]:
+async def _stream(
+    client: AsyncClient, message: str, session_id: str | None = None
+) -> list[tuple[str, dict]]:
     blocks: list[str] = []
     buffer = ""
+    payload: dict = {"message": message}
+    if session_id:
+        payload["session_id"] = session_id
     async with client.stream(
         "POST",
         "/api/v1/agent/chat/stream",
-        json={"message": message},
+        json=payload,
     ) as response:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
@@ -74,8 +81,10 @@ async def test_golden_sample_a_named_dish_with_budget() -> None:
     assert names[-1] == "done"
     assert "text" in names
     assert "plan" not in names
-    assert "questions" not in names
     assert "thinking" not in names  # 未配置云端模型时无思维链事件
+    # 本地库命中给做法:末尾带"要不要换通用做法"的反问 chips
+    assert "questions" in names
+    assert _single(events, "questions")["items"] == ["不用本地菜谱库的做法"]
 
     # 步骤直播:首事件必须是"准备会话"running,每条 status 都带动态步骤名
     assert events[0][0] == "status"
@@ -247,13 +256,13 @@ async def test_fuzzy_dish_name_takes_priority_over_ingredient() -> None:
 
 
 async def test_inventory_menu_ranks_expiring_first() -> None:
-    """库存菜单:Agent 自读冰箱出候选,临期优先排序,标注用到的库存食材与缺口。"""
+    """库存菜单:纯文本菜单与其他回复统一样式,临期优先排序,行内标注用冰箱/缺料。"""
     client = await _client()
     async with client:
         events = await _stream(client, "根据冰箱库存去生成一些菜单供我选，优先使用临期的")
 
     names = [name for name, _ in events]
-    assert "candidates" in names
+    assert "candidates" not in names  # 与其他回复统一:不再发候选卡
     assert "plan" not in names
     assert "text" in names
     assert "thinking" in names  # 库存菜单的思考过程(读取冰箱/排序依据)
@@ -268,14 +277,12 @@ async def test_inventory_menu_ranks_expiring_first() -> None:
     )
     assert any(item["step"] == "filter_hard_constraints" for item in status_items)
 
-    candidates = _single(events, "candidates")
-    assert candidates["query"] == "冰箱库存"
-    first = candidates["items"][0]
-    assert first["expiring"] is True, "用到临期食材的菜必须排最前"
-    assert first["used_fridge"], "必须标注使用了冰箱的哪些食材"
-
-    text = next(data for name, data in events if name == "text")["delta"]
+    text = "".join(data.get("delta", "") for name, data in events if name == "text")
+    assert "我看了下冰箱" in text
     assert "临期" in text
+    assert "1. **" in text  # 编号菜名列表
+    assert "还缺" in text  # 缺料标注
+    assert "想看哪道菜的做法" in text
     assert _single(events, "done")["route"] == "kitchen_recipe"
 
 
@@ -416,6 +423,60 @@ def test_constraint_warnings_for_text() -> None:
     assert _format_warning_block([]) == ""
 
 
+def test_wants_non_library_recipe_detection() -> None:
+    """否定句识别:否定词+库来源词同时命中才判定,无关句不误伤。"""
+    assert _wants_non_library_recipe("不想按照本地库的做法")
+    assert _wants_non_library_recipe("不想接受本地库的做法")
+    assert _wants_non_library_recipe("不用本地菜谱库的做法")
+    assert not _wants_non_library_recipe("想吃辣子鸡")
+    assert not _wants_non_library_recipe("换个做法")
+    assert not _wants_non_library_recipe("不要香菜")
+
+
+def test_looks_like_inventory_menu_phrases() -> None:
+    """「看看冰箱里有什么」纯查询句式要命中;家电养护类问题不进库存菜单。"""
+    assert _looks_like_inventory_menu("看看冰箱里有什么")
+    assert _looks_like_inventory_menu("根据冰箱现有食材吧")
+    assert _looks_like_inventory_menu("看看冰箱里有什么适合今天吃的")
+    assert not _looks_like_inventory_menu("冰箱有什么异味怎么去除")
+    assert not _looks_like_inventory_menu("冰箱温度调到多少合适")
+
+
+async def test_fridge_inventory_query_returns_text_menu() -> None:
+    """「看看冰箱里有什么」读真实冰箱出纯文本菜单,不落问答也不发候选卡。"""
+    client = await _client()
+    async with client:
+        events = await _stream(client, "看看冰箱里有什么")
+
+    names = [name for name, _ in events]
+    assert "candidates" not in names
+    text = "".join(data.get("delta", "") for name, data in events if name == "text")
+    assert "我看了下冰箱" in text
+    assert any("冰箱" in item["label"] for item in _status_items(events))
+    assert _single(events, "done")["route"] == "kitchen_recipe"
+
+
+async def test_non_library_refusal_resolves_dish_from_context() -> None:
+    """「不想按照本地库的做法」对接上一轮:不查库,解析所指菜,按通用做法生成。"""
+    client = await _client()
+    async with client:
+        events1 = await _stream(client, "我想吃虾仁炒蛋")
+        session_id = _single(events1, "done")["session_id"]
+        events = await _stream(client, "不想按照本地库的做法", session_id)
+
+    names = [name for name, _ in events]
+    assert "candidates" not in names
+    steps = [item["step"] for item in _status_items(events)]
+    assert "search_recipe_candidates" not in steps  # 不调取本地菜谱库
+    assert "list_inventory" not in steps  # 通用做法用不到冰箱
+    assert "get_member_constraints" in steps  # 忌口检查照常
+    done = _single(events, "done")
+    assert done["route"] == "kitchen_recipe"
+    assert done["search_query"] == "虾仁炒蛋"  # 从上一轮解析出所指的菜
+    text = "".join(data.get("delta", "") for name, data in events if name == "text")
+    assert "虾仁炒蛋" in text
+
+
 def test_dish_keyword_cleaning_for_external_search() -> None:
     """下厨房等外部搜索只留干净关键词:时间状语/意图动词/语气词一律剥掉。"""
     assert _dish_name_from_text("明天想吃黄焖鸡") == "黄焖鸡"
@@ -434,6 +495,8 @@ async def test_fridge_ingredient_followup_routes_to_inventory() -> None:
         events = await _stream(client, "根据冰箱现有食材吧")
 
     names = [name for name, _ in events]
-    assert "candidates" in names
+    assert "candidates" not in names  # 统一纯文本样式,不再发候选卡
+    text = "".join(data.get("delta", "") for name, data in events if name == "text")
+    assert "我看了下冰箱" in text
     assert any("冰箱" in item["label"] for item in _status_items(events))
     assert _single(events, "done")["route"] == "kitchen_recipe"

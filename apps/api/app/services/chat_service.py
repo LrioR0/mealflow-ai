@@ -369,21 +369,111 @@ def _recall_recipes_by_ingredient(
     return items, len(scored)
 
 
+# 家电养护类问题(提到冰箱但问的是机器本身)不进库存菜单,照常落问答
+_INVENTORY_MENU_EXCLUDE_TERMS = (
+    "异味", "除味", "除臭", "除霜", "清洁", "清洗", "保养",
+    "省电", "费电", "噪音", "漏水", "温度",
+)
+
+
 def _looks_like_inventory_menu(text: str) -> bool:
     """冰箱/库存 + 要菜单/能做什么类诉求 → 库存驱动菜单分支(Agent 自读冰箱)。
 
-    「根据冰箱现有食材吧」这类省略句式(无显式动词)也要命中,否则落到问答
-    路由,模型会回答"没有权限看冰箱"(实测踩过的坑)。
+    「根据冰箱现有食材吧」「看看冰箱里有什么」这类省略/纯查询句式也要命中,
+    否则落到问答路由,模型会回答"没有权限看冰箱"(实测踩过两次的坑)。
     """
-    has_source = "冰箱" in text or "库存" in text
+    if "冰箱" not in text and "库存" not in text:
+        return False
+    if any(term in text for term in _INVENTORY_MENU_EXCLUDE_TERMS):
+        return False
     wants_menu = any(
         term in text
         for term in (
             "菜单", "什么菜", "能做", "做菜", "做饭", "做什么", "吃什么", "吃",
             "推荐", "生成", "选", "临期", "适合", "安排", "现有食材", "有什么食材", "食材",
+            "有什么", "有啥",
         )
     )
-    return has_source and wants_menu
+    return wants_menu
+
+
+# 「不想按照本地库的做法」这类否定句:否定词 + 库来源词同时命中才判定,
+# 避免"换个做法""不要香菜"这类无关句误伤;长短语在前,剥离时按长度降序
+_LIBRARY_REFUSAL_TERMS = (
+    "不想按照", "不想照着", "不想用", "不想接受", "不想参考", "不想参照",
+    "不要按照", "不要照着", "不要用", "不要参考", "不要参照",
+    "不用按照", "不用照着", "不用本地", "不用菜谱",
+    "不想按", "不想照", "不要按", "不要用",
+    "别按", "别用", "不按", "不参照",
+)
+_LIBRARY_SOURCE_TERMS = (
+    "本地库", "本地菜谱", "菜谱库", "库里的", "库的做法", "库做法", "标准菜谱",
+)
+
+
+def _wants_non_library_recipe(text: str) -> bool:
+    """识别「不想按照本地库的做法」:要求抛开本地菜谱库、给独立的通用做法。"""
+    return any(term in text for term in _LIBRARY_REFUSAL_TERMS) and any(
+        term in text for term in _LIBRARY_SOURCE_TERMS
+    )
+
+
+def _resolve_refusal_dish(
+    user_text: str,
+    context: PlanningContext,
+    session_id: str,
+    current_message_id: str | None,
+) -> str | None:
+    """否定句里解析用户所指的菜:①本句剥离否定与库字样;②回看会话最近用户消息。
+
+    解析不出返回 None,由调用方反问,不硬猜。
+    """
+    stripped = user_text
+    # 注意:"库的做法"只用于检测不用于剥离(先剥它会把"本地库"拆坏),剥离按长度降序
+    for term in sorted(
+        (
+            *_LIBRARY_REFUSAL_TERMS,
+            "本地库", "本地菜谱", "菜谱库", "库里的", "库的", "标准菜谱", "库做法",
+            "的做法", "做法", "菜谱", "食谱", "的",
+        ),
+        key=len,
+        reverse=True,
+    ):
+        stripped = stripped.replace(term, "")
+    stripped = stripped.strip(" ，,。！？?!、;；:：的吧呢啊呀哈呦")
+    if stripped:
+        candidate = _dish_name_from_text(stripped)
+        if (
+            len(candidate) >= 2
+            and candidate != "这道菜"
+            and not any(
+                term in candidate
+                for term in (*_LIBRARY_REFUSAL_TERMS, *_LIBRARY_SOURCE_TERMS)
+            )
+        ):
+            return candidate
+    if session_id:
+        with SessionLocal() as session:
+            rows = session.scalars(
+                select(AgentChatMessage)
+                .where(AgentChatMessage.session_id == session_id)
+                .where(AgentChatMessage.role == "user")
+                .order_by(AgentChatMessage.created_at.desc())
+                .limit(6)
+            ).all()
+        for row in rows:
+            if current_message_id and row.id == current_message_id:
+                continue
+            prev_text = _message_without_frontend_context(row.content or "")
+            if not prev_text:
+                continue
+            prev_intent = _detect_intent(prev_text, context, has_previous_run=False)
+            if prev_intent.named_recipes:
+                return prev_intent.named_recipes[0].name
+            dish = _dish_name_from_text(prev_text)
+            if dish != "这道菜" and _recipe_by_name(context, dish) is not None:
+                return dish
+    return None
 
 
 def _build_inventory_menu(context: PlanningContext) -> tuple[list[dict], int]:
@@ -994,6 +1084,115 @@ def _recent_history_messages(
     return history
 
 
+async def _handle_library_refusal(
+    *,
+    payload: ChatStreamRequest,
+    user_text: str,
+    context: PlanningContext,
+    session_id: str,
+    current_user_message_id: str | None,
+    settings,
+) -> AsyncIterator[str]:
+    """「不想按照本地库的做法」专用分支:不查库,解析所指菜后按通用做法生成。"""
+    dish = _resolve_refusal_dish(user_text, context, session_id, current_user_message_id)
+    if dish is None:
+        yield _status("compose_reply", "组织回答", "running")
+        full_text = (
+            "好的，之后这道菜就不按本地菜谱库来。"
+            "告诉我想做哪道菜，我直接给一份独立的通用做法。"
+        )
+        yield _sse("text", {"delta": full_text})
+        yield _status("compose_reply", "组织回答", "done")
+        message_id = None
+        with SessionLocal() as session:
+            message = AgentChatMessage(
+                session_id=session_id,
+                role="assistant",
+                content=full_text,
+                thinking_text=None,
+                run_id=None,
+            )
+            session.add(message)
+            session.commit()
+            session.flush()
+            message_id = message.id
+        yield _sse(
+            "done",
+            {
+                "session_id": session_id,
+                "message_id": message_id,
+                "needs_input": True,
+                "provider": None,
+                "route": "kitchen_recipe",
+            },
+        )
+        return
+
+    yield _status("compose_reply", "生成通用做法", "running")
+    text_parts: list[str] = []
+    thinking_parts: list[str] = []
+    avoid_library_instruction = (
+        "\n用户明确表示不想按本地菜谱库的做法，请给一份独立的家常通用做法，"
+        "不要参考或照搬本地菜谱库的步骤与用量。"
+    )
+    async for kind, delta in _llm_stream_text(
+        [
+            {
+                "role": "system",
+                "content": _generic_recipe_prompt(dish, context) + avoid_library_instruction,
+            },
+            *_recent_history_messages(session_id, current_user_message_id),
+            {"role": "user", "content": user_text},
+        ]
+    ):
+        if kind == "thinking" and delta:
+            thinking_parts.append(delta)
+            yield _sse("thinking", {"delta": delta})
+        elif kind == "text" and delta:
+            text_parts.append(delta)
+            yield _sse("text", {"delta": delta})
+    full_text = "".join(text_parts) or _fallback_generic_recipe_text(dish)
+    yield _status(
+        "compose_reply",
+        "生成通用做法",
+        "done",
+        "" if text_parts else "模型暂不可用,已按规则文本回答",
+    )
+    if not text_parts:
+        yield _sse("text", {"delta": full_text})
+    warning_block = _format_warning_block(
+        _constraint_warnings_for_text(full_text, context, True)
+    )
+    if warning_block:
+        yield _sse("text", {"delta": warning_block})
+        full_text += warning_block
+    message_id = None
+    with SessionLocal() as session:
+        message = AgentChatMessage(
+            session_id=session_id,
+            role="assistant",
+            content=full_text,
+            thinking_text="".join(thinking_parts) or None,
+            run_id=None,
+        )
+        session.add(message)
+        session.commit()
+        session.flush()
+        message_id = message.id
+    yield _sse(
+        "done",
+        {
+            "session_id": session_id,
+            "message_id": message_id,
+            "needs_input": False,
+            "provider": settings.llm_provider if text_parts else None,
+            "route": "kitchen_recipe",
+            "search_query": dish,
+            "search_queries": [dish],
+        },
+    )
+
+
 async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
     settings = get_settings()
     current_user_message_id: str | None = None
@@ -1045,8 +1244,17 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             )
             else "kitchen_qa"
         )
+    # 「不想按照本地库的做法」这类对接上一轮的否定句:不查库,按通用做法重新生成
+    library_refusal = route == "kitchen_recipe" and _wants_non_library_recipe(user_text)
     yield _status(
-        "parse_request", "理解需求", "done", _ROUTE_SUMMARY.get(route, "厨房对话")
+        "parse_request",
+        "理解需求",
+        "done",
+        (
+            "不按本地菜谱库,按通用做法生成"
+            if library_refusal
+            else _ROUTE_SUMMARY.get(route, "厨房对话")
+        ),
     )
     if route == "general":
         # 普通话题不读取厨房上下文,不创建规划运行,也不发送 thinking/plan。
@@ -1205,7 +1413,9 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         return
 
     yield _status("get_member_constraints", "检查用餐限制", "running")
-    yield _status("list_inventory", "调取冰箱", "running")
+    if not library_refusal:
+        # 通用做法用不到冰箱,否定句轮次不发这条步骤
+        yield _status("list_inventory", "调取冰箱", "running")
     try:
         with SessionLocal() as session:
             context = load_planning_context(
@@ -1223,21 +1433,34 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
     context.member_constraints = _filter_constraints(
         context.member_constraints, payload.diners_user_ids
     )
-    in_stock_names = [line.name for line in context.inventory if line.quantity > 0]
-    inventory_preview = "、".join(in_stock_names[:6])
-    yield _status(
-        "list_inventory",
-        "调取冰箱",
-        "done",
-        (
-            f"冰箱现有 {inventory_preview}"
-            + (" 等" if len(in_stock_names) > 6 else "")
-            + f" 共 {len(in_stock_names)} 种食材"
-            if in_stock_names
-            else "冰箱是空的,先补点货"
-        ),
-    )
+    if not library_refusal:
+        in_stock_names = [line.name for line in context.inventory if line.quantity > 0]
+        inventory_preview = "、".join(in_stock_names[:6])
+        yield _status(
+            "list_inventory",
+            "调取冰箱",
+            "done",
+            (
+                f"冰箱现有 {inventory_preview}"
+                + (" 等" if len(in_stock_names) > 6 else "")
+                + f" 共 {len(in_stock_names)} 种食材"
+                if in_stock_names
+                else "冰箱是空的,先补点货"
+            ),
+        )
     yield _status("get_member_constraints", "检查用餐限制", "done", _constraints_detail(context))
+
+    if library_refusal:
+        async for chunk in _handle_library_refusal(
+            payload=payload,
+            user_text=user_text,
+            context=context,
+            session_id=session_id,
+            current_user_message_id=current_user_message_id,
+            settings=settings,
+        ):
+            yield chunk
+        return
 
     latest_run_id = _latest_run_id(payload.workspace_id)
     yield _status("search_recipe_candidates", "调取本地菜谱库", "running")
@@ -1313,18 +1536,33 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 for line in context.inventory
                 if line.quantity > 0
             ]
+            # 候选菜写成纯文本菜单,与其他回复统一样式(不再发 candidates 候选卡)
+            dish_lines = []
+            for index, item in enumerate(menu_items, start=1):
+                parts = []
+                if item.get("used_fridge"):
+                    used = [
+                        f"{name}（临期）"
+                        if item.get("expiring_used") and name in item["expiring_used"]
+                        else name
+                        for name in item["used_fridge"]
+                    ]
+                    parts.append("用冰箱的" + "、".join(used))
+                if item.get("missing"):
+                    parts.append("还缺" + "、".join(item["missing"]))
+                if item.get("conflict_level") and item.get("conflict_summary"):
+                    parts.append(f"⚠ {item['conflict_summary']}")
+                detail = "；".join(parts)
+                dish_lines.append(f"{index}. **{item['name']}**" + (f"：{detail}" if detail else ""))
             lead_text = (
                 "我看了下冰箱，现有："
                 + "、".join(stock_names)
                 + "。"
                 + f"结合库存给你挑了 {len(menu_items)} 道菜"
                 + (f"（共 {menu_total} 道，先展示最相关的 {len(menu_items)} 道）" if menu_total > len(menu_items) else "")
-                + "，用到临期食材的排在了前面，点击菜名查看按当前人数换算的做法。"
-                "标红的含你的过敏原、标黄的撞上当前忌口或状态，仅供参考，仍可查看。"
-            )
-            yield _sse(
-                "candidates",
-                {"query": "冰箱库存", "total": menu_total, "items": menu_items},
+                + "，用到临期食材的排在了前面：\n\n"
+                + "\n".join(dish_lines)
+                + "\n\n想看哪道菜的做法，直接回我菜名，我按当前人数换算给步骤。"
             )
         else:
             lead_text = (
@@ -1332,11 +1570,20 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 "先补点货，或者直接告诉我你想吃的菜，我来给做法。"
             )
         yield _sse("text", {"delta": lead_text})
+        full_text = lead_text
+        if menu_items:
+            # 与其他路由一致的确定性忌口提示块
+            warning_block = _format_warning_block(
+                _constraint_warnings_for_text(full_text, context, True)
+            )
+            if warning_block:
+                yield _sse("text", {"delta": warning_block})
+                full_text += warning_block
         with SessionLocal() as session:
             message = AgentChatMessage(
                 session_id=session_id,
                 role="assistant",
-                content=lead_text,
+                content=full_text,
                 thinking_text=thinking_log or None,
                 run_id=None,
             )
@@ -1526,6 +1773,14 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 if warning_block:
                     yield _sse("text", {"delta": warning_block})
                     full_text += warning_block
+                # 用了本地菜谱库就明说,并反问要不要换成不按库的通用做法(前端 chips 点击即发)
+                library_note = (
+                    f"\n\n以上做法参考了本地菜谱库《{recipe.name}》。"
+                    "想换一份不按本地菜谱库的通用做法，点下面按钮或直接回复。"
+                )
+                yield _sse("text", {"delta": library_note})
+                full_text += library_note
+                yield _sse("questions", {"items": ["不用本地菜谱库的做法"]})
             message_id = None
             with SessionLocal() as session:
                 message = AgentChatMessage(
