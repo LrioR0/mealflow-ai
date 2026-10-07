@@ -1774,11 +1774,67 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                     },
                 )
                 return
+            if not items:
+                # 本地三级检索与食材相似全部落空 → 实时搜索下厨房;
+                # 搜索失败/无结果时静默落到下方 LLM 通用做法兜底
+                from app.services.web_recipe_search import search_with_briefs
+
+                yield _status("web_search", "实时搜索网络菜谱", "running")
+                web_items = search_with_briefs(dish_name, limit=3)
+                yield _status(
+                    "web_search",
+                    "实时搜索网络菜谱",
+                    "done",
+                    f"下厨房搜索「{dish_name}」"
+                    + (f"，返回 {len(web_items)} 条" if web_items else "，无结果"),
+                )
+                if web_items:
+                    web_thinking = (
+                        f"【理解需求】提取目标菜名：「{dish_name}」\n"
+                        "【检索】本地菜谱库三级检索与食材相似均未命中\n"
+                        f"【实时搜索】下厨房返回 {len(web_items)} 条，仅取食材清单与步骤梗概，完整做法见来源链接\n"
+                    )
+                    for chunk in web_thinking.splitlines():
+                        if chunk:
+                            yield _sse("thinking", {"delta": chunk + "\n"})
+                    lead_text = (
+                        f"本地菜谱库暂未检索到「{dish_name}」，已为你实时搜索到 {len(web_items)} 个网络菜谱"
+                        "（含食材清单与做法梗概，点击标题可查看完整步骤）："
+                    )
+                    yield _sse(
+                        "web_recipes",
+                        {"query": dish_name, "items": web_items},
+                    )
+                    yield _sse("text", {"delta": lead_text})
+                    with SessionLocal() as session:
+                        message = AgentChatMessage(
+                            session_id=session_id,
+                            role="assistant",
+                            content=lead_text,
+                            thinking_text=web_thinking,
+                            run_id=None,
+                        )
+                        session.add(message)
+                        session.commit()
+                        message_id = message.id
+                    yield _sse(
+                        "done",
+                        {
+                            "session_id": session_id,
+                            "message_id": message_id,
+                            "needs_input": False,
+                            "provider": None,
+                            "route": "kitchen_recipe",
+                            "search_query": dish_name,
+                            "search_queries": [dish_name],
+                        },
+                    )
+                    return
             yield _status(
                 "search_recipe_candidates",
                 "检索菜谱库",
                 "done",
-                f"菜名与食材均未检索到「{dish_name}」,改用通用做法生成",
+                f"本地库与实时搜索均未命中「{dish_name}」，改用通用做法生成",
             )
             dish_name = _dish_name_from_text(user_text)
             text_parts: list[str] = []

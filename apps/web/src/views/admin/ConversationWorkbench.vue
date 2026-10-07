@@ -47,6 +47,16 @@ interface CandidateItem {
   missing: string[]
 }
 
+// 库未命中时实时搜索到的网络菜谱(下厨房),仅食材清单与步骤梗概
+interface WebRecipeItem {
+  title: string
+  url: string
+  ingredients: string
+  rating: string | null
+  cooked_count: string | null
+  steps_brief: string[]
+}
+
 interface ChatBubble {
   id: string
   role: 'user' | 'assistant'
@@ -63,6 +73,8 @@ interface ChatBubble {
   searchQuery?: string
   candidates?: CandidateItem[]
   candidatesQuery?: string
+  webQuery?: string
+  webRecipes?: WebRecipeItem[]
   thinkingOpen?: boolean
 }
 
@@ -556,6 +568,11 @@ async function send(preset?: string) {
         assistant.thinkingDone = true
         assistant.candidatesQuery = String(event.data.query ?? '')
         assistant.candidates = (event.data.items as CandidateItem[]) ?? []
+      } else if (event.event === 'web_recipes') {
+        // 本地库未命中时的实时搜索结果(下厨房,仅食材清单与步骤梗概)
+        assistant.thinkingDone = true
+        assistant.webQuery = String(event.data.query ?? '')
+        assistant.webRecipes = (event.data.items as WebRecipeItem[]) ?? []
       } else if (event.event === 'questions') {
         assistant.questions = (event.data.items as string[]) ?? []
       } else if (event.event === 'error') {
@@ -786,6 +803,48 @@ function stopGeneration() {
                       </table>
                     </div>
                   </div>
+                </div>
+              </div>
+
+              <!-- 本地库未命中:实时搜索到的网络菜谱(下厨房,仅食材清单与步骤梗概) -->
+              <div v-if="bubble.webRecipes?.length" class="candidate-card web-recipe-card">
+                <div class="candidate-card-head">
+                  <strong>实时搜索「{{ bubble.webQuery }}」的网络菜谱</strong>
+                  <small>来源：下厨房 · 点击标题查看完整做法</small>
+                </div>
+                <div class="web-recipe-list">
+                  <div v-for="item in bubble.webRecipes" :key="item.url" class="web-recipe-item">
+                    <a
+                      class="web-recipe-name"
+                      :href="item.url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {{ item.title }}
+                      <small v-if="item.rating" class="web-recipe-stats">
+                        ★{{ item.rating }} · {{ item.cooked_count }} 人做过
+                      </small>
+                    </a>
+                    <p class="web-recipe-ing">食材：{{ item.ingredients }}</p>
+                    <details v-if="item.steps_brief.length" class="web-recipe-steps">
+                      <summary>做法梗概（{{ item.steps_brief.length }} 步）</summary>
+                      <ol>
+                        <li v-for="(step, stepIndex) in item.steps_brief" :key="stepIndex">
+                          {{ step }}
+                        </li>
+                      </ol>
+                    </details>
+                  </div>
+                </div>
+                <div class="web-recipe-foot">
+                  <a
+                    :href="`https://www.xiachufang.com/search/?keyword=${encodeURIComponent(bubble.webQuery ?? '')}`"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    在下厨房查看更多「{{ bubble.webQuery }}」↗
+                  </a>
+                  <small>网络菜谱为通用做法，未适配忌口与库存，请自行调整。</small>
                 </div>
               </div>
 
@@ -1478,6 +1537,27 @@ function stopGeneration() {
   box-shadow: 0 8px 24px rgba(33, 60, 54, 0.05);
   overflow: hidden;
 }
+/* 实时搜索的网络菜谱卡(下厨房):样式基调与候选卡一致 */
+.web-recipe-list { display: grid; }
+.web-recipe-item { padding: 0.65rem 0.95rem; display: grid; gap: 5px; }
+.web-recipe-item + .web-recipe-item { border-top: 1px solid #f0f4f1; }
+.web-recipe-name {
+  color: #21403a; font-size: 13.5px; font-weight: 700;
+  text-decoration: none; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.web-recipe-name:hover { color: var(--green); text-decoration: underline; }
+.web-recipe-stats { color: #a2701d; font-size: 11px; font-weight: 600; }
+.web-recipe-ing { margin: 0; font-size: 12.5px; color: #3d524c; }
+.web-recipe-steps { font-size: 12.5px; color: #3d524c; }
+.web-recipe-steps summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.web-recipe-steps ol { margin: 6px 0 0; padding-left: 22px; display: grid; gap: 4px; }
+.web-recipe-foot {
+  display: grid; gap: 3px; padding: 0.6rem 0.95rem;
+  border-top: 1px solid #eef4f0; background: #f7fbf8;
+}
+.web-recipe-foot a { color: var(--green); font-size: 12.5px; font-weight: 700; text-decoration: none; }
+.web-recipe-foot a:hover { text-decoration: underline; }
+.web-recipe-foot small { color: var(--muted); font-size: 11px; }
 .candidate-card-head {
   display: flex;
   justify-content: space-between;

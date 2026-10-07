@@ -1,6 +1,8 @@
 import json
 from datetime import date
 
+import httpx
+import pytest
 from httpx import AsyncClient, ASGITransport
 
 from app.main import app
@@ -16,6 +18,14 @@ from app.services.chat_service import (
     _wants_non_library_recipe,
 )
 from app.services.context_loader import InventoryLine, MemberConstraint, PlanningContext
+
+
+@pytest.fixture(autouse=True)
+def _disable_web_recipe_search(monkeypatch):
+    """单元测试不打真实外网:库未命中场景统一走 LLM 通用做法兜底路径。"""
+    monkeypatch.setattr(
+        "app.services.web_recipe_search.search_with_briefs", lambda *args, **kwargs: []
+    )
 
 
 def _parse_sse_blocks(blocks: list[str]) -> list[tuple[str, dict]]:
