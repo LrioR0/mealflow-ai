@@ -23,3 +23,11 @@ class ChatSessionView(BaseModel):
     session_id: str
     title: str
     messages: list[ChatMessageView]
+
+
+class ChatSessionSummary(BaseModel):
+    """会话列表条目:轻量摘要,不含消息体。"""
+
+    session_id: str
+    title: str
+    updated_at: str

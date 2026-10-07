@@ -59,6 +59,20 @@ async def chat_once(payload: ChatStreamRequest) -> dict:
     return result
 
 
+@router.get("/sessions")
+def list_sessions(workspace_id: str = "home-workspace") -> list[dict]:
+    """会话列表:最近更新倒序,供前端历史会话下拉。"""
+    return [item.model_dump() for item in chat_service.list_sessions(workspace_id)]
+
+
+@router.delete("/{session_id}")
+def delete_session(session_id: str) -> dict:
+    """删除会话及其全部消息,不可恢复。"""
+    if not chat_service.delete_session(session_id):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"deleted": True}
+
+
 @router.get("/{session_id}")
 def get_session(session_id: str) -> dict:
     view = chat_service.get_session_view(session_id)
