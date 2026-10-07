@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { generateProcurement } from '../../composables/procurement'
 import { useAgentHandoffStore } from '../../stores/agentHandoff'
 
-import { ArrowDown, Check, CopyDocument, Delete, User } from '@element-plus/icons-vue'
+import { ArrowDown, Check, Delete, User } from '@element-plus/icons-vue'
 
 import {
   conversationStarted,
@@ -97,7 +97,6 @@ watch(
 const input = ref('')
 const sending = ref(false)
 const currentAbort = ref<AbortController | null>(null)
-const copiedId = ref<string | null>(null)
 const sessionId = ref<string | null>(null)
 const listEl = ref<HTMLElement | null>(null)
 const recipeCache = ref<Record<string, RecipeDetail>>({})
@@ -597,19 +596,6 @@ function stopGeneration() {
   currentAbort.value?.abort()
 }
 
-// 复制消息原文;按钮上的「已复制」反馈短暂显示
-async function copyMessage(bubble: ChatBubble) {
-  try {
-    await navigator.clipboard.writeText(bubble.content)
-    copiedId.value = bubble.id
-    setTimeout(() => {
-      if (copiedId.value === bubble.id) copiedId.value = null
-    }, 1500)
-  } catch {
-    ElMessage.error('复制失败，请手动选择文本复制')
-  }
-}
-
 </script>
 
 <template>
@@ -677,13 +663,9 @@ async function copyMessage(bubble: ChatBubble) {
         </div>
 
         <template v-for="bubble in messages" :key="bubble.id">
-          <!-- 用户消息:右对齐气泡,悬浮渐显复制按钮 -->
+          <!-- 用户消息:右对齐气泡 -->
           <div v-if="bubble.role === 'user'" class="msg-row user">
             <div class="user-bubble">{{ bubble.content }}</div>
-            <button class="copy-btn" type="button" title="复制内容" @click="copyMessage(bubble)">
-              <el-icon><component :is="copiedId === bubble.id ? Check : CopyDocument" /></el-icon>
-              {{ copiedId === bubble.id ? '已复制' : '复制' }}
-            </button>
           </div>
 
           <!-- Agent 消息:思考直播 → 步骤 → 回答 → 方案卡 → 反问 -->
@@ -943,11 +925,6 @@ async function copyMessage(bubble: ChatBubble) {
               </div>
             </div>
 
-            <!-- 悬浮渐显的复制按钮:渐变出现,不突兀 -->
-            <button class="copy-btn" type="button" title="复制内容" @click="copyMessage(bubble)">
-              <el-icon><component :is="copiedId === bubble.id ? Check : CopyDocument" /></el-icon>
-              {{ copiedId === bubble.id ? '已复制' : '复制' }}
-            </button>
           </div>
         </template>
       </div>
@@ -1231,30 +1208,6 @@ async function copyMessage(bubble: ChatBubble) {
 .hero-chips .el-button:hover { border-color: var(--green-2); background: #f3f8f5; }
 .chip-icon { margin-right: 4px; color: var(--gold); }
 .msg-row { display: flex; }
-/* 悬浮渐显的复制按钮:透明+下移态过渡到实位,不突兀 */
-.copy-btn {
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 3px;
-  padding: 2.5px 9px;
-  border: 0;
-  border-radius: 999px;
-  background: none;
-  color: var(--muted);
-  font-size: 11.5px;
-  cursor: pointer;
-  opacity: 0;
-  transform: translateY(3px);
-  transition: opacity 0.22s ease, transform 0.22s ease, color 0.15s ease, background 0.15s ease;
-}
-.msg-row:hover .copy-btn {
-  opacity: 1;
-  transform: translateY(0);
-}
-.copy-btn:hover { background: #eef4f0; color: var(--green-2); }
-.msg-row.user .copy-btn { align-self: flex-end; }
 .stopped-note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .msg-row.user { justify-content: flex-end; }
 .user-bubble {
