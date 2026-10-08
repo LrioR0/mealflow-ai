@@ -270,7 +270,7 @@ _FOOD_QUERY_STRIP_PATTERNS = (
     # 用餐人称
     r"(我们俩|两个人|我俩|两人|大家|就我自己|我自己|我一个人|我一人|一个人|帮我)",
     # 动词短语(放最后,避免先把「吃」从「想吃」里单独剥走)
-    r"(想吃点|想吃|想做个|想做|想来点|想要|要吃|要做|来一份|来份|来个|来点|做个|做一道|吃点|安排)",
+    r"(我想吃|我想做|我想来|我想要|我要吃|想吃点|想吃|想做个|想做|想来点|想要|要吃|要做|来一份|来份|来个|来点|做个|做一道|吃点|安排)",
 )
 
 
@@ -1695,32 +1695,26 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             # 意图关键词先行:先剥出目标菜名,再按「菜名精准 > 菜名模糊 > 食材相似」
             # 三级检索,禁止把用户整段原话当检索词丢进菜谱库
             dish_name = _dish_name_from_text(user_text)
+            # 查询类型:剥出的词被某配料名包含(虾⊂鲜虾、茄子==茄子)是食材意图,本地食材推荐优先;
+            # 剥出的词比配料名更长或无配料关联(风味茄子/烤蛋挞/鲤鱼焙面)是菜名意图,
+            # 本地库未收录时应实时搜索这道菜
+            ingredient_names = set(_key_name_map(context).values())
+            is_dish_query = not any(dish_name in name for name in ingredient_names)
             yield _status("search_recipe_candidates", "检索菜谱库", "running")
             tier, items, total = _search_recipes_by_dish(dish_name, context)
+            search_query = dish_name
+            tier_label = ""
             if tier == "precise":
                 tier_label = f"菜名精准匹配命中 {total} 道"
             elif tier == "fuzzy":
                 tier_label = f"菜名精准 0 道，菜名模糊匹配命中 {total} 道"
-            else:
-                # 两级菜名检索都落空 → 降级食材相似推荐,并明确告知用户。
-                # 食材词只从「食材:」段/库内配料名提取,不拿整段原话当检索词
-                food_terms = _extract_food_terms(user_text, context)
-                items, total = _recall_recipes_by_ingredient(food_terms, context)
-                tier = "ingredient"
-                query_label = "、".join(food_terms) if food_terms else dish_name
-                tier_label = (
-                    f"菜名精准 0 道，菜名模糊 0 道，"
-                    + f"食材(「{query_label}」)相似命中 {total} 道"
+            if tier in ("precise", "fuzzy"):
+                yield _status(
+                    "search_recipe_candidates",
+                    "检索菜谱库",
+                    "done",
+                    f"关键词「{search_query}」：{tier_label}",
                 )
-                search_query = query_label
-            if tier != "ingredient":
-                search_query = dish_name
-            yield _status(
-                "search_recipe_candidates",
-                "检索菜谱库",
-                "done",
-                f"关键词「{search_query}」：{tier_label}",
-            )
             if items:
                 # 合成思考过程:只写精简推理摘要,不粘贴用户原话
                 recipe_thinking = (
@@ -1774,9 +1768,9 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                     },
                 )
                 return
-            if not items:
-                # 本地三级检索与食材相似全部落空 → 实时搜索下厨房;
-                # 搜索失败/无结果时静默落到下方 LLM 通用做法兜底
+            if is_dish_query:
+                # 菜名意图且本地库未收录 → 实时搜索下厨房这道菜;
+                # 搜索失败/无结果时落到下方食材相似与 LLM 通用做法兜底
                 from app.services.web_recipe_search import search_with_briefs
 
                 yield _status("web_search", "实时搜索网络菜谱", "running")
@@ -1830,13 +1824,73 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                         },
                     )
                     return
+            # 食材意图的主路径 / 菜名意图实时搜索落空后的兜底:食材相似推荐
+            food_terms = _extract_food_terms(user_text, context)
+            items, total = _recall_recipes_by_ingredient(food_terms, context)
+            if items:
+                tier = "ingredient"
+                search_query = "、".join(food_terms) if food_terms else dish_name
+                tier_label = (
+                    f"菜名精准 0 道，菜名模糊 0 道，"
+                    + f"食材(「{search_query}」)相似命中 {total} 道"
+                )
+                yield _status(
+                    "search_recipe_candidates",
+                    "检索菜谱库",
+                    "done",
+                    f"关键词「{search_query}」：{tier_label}",
+                )
+                recipe_thinking = (
+                    f"【理解需求】提取目标菜名：「{dish_name}」，目标食材：「{search_query}」\n"
+                    "【检索】本地菜谱库菜名层未命中，按食材相似推荐替代菜品\n"
+                    "【标注】库存使用与过敏/忌口冲突只提示不过滤，决定权在你\n"
+                )
+                for chunk in recipe_thinking.splitlines():
+                    if chunk:
+                        yield _sse("thinking", {"delta": chunk + "\n"})
+                lead_text = (
+                    f"本地菜谱库暂未检索到「{dish_name}」，为你推荐含有相关食材的替代菜品。\n\n"
+                    f"根据食材「{search_query}」检索到 {total} 道相关菜品"
+                    + (f"（先展示最相关的 {len(items)} 道）" if total > len(items) else "")
+                    + "，点击菜名即可查看按当前人数换算的做法。"
+                    "标红的含你的过敏原、标黄的撞上当前忌口或状态，仅供参考，仍可查看。"
+                )
+                yield _sse(
+                    "candidates",
+                    {"query": search_query, "total": total, "items": items},
+                )
+                yield _sse("text", {"delta": lead_text})
+                with SessionLocal() as session:
+                    message = AgentChatMessage(
+                        session_id=session_id,
+                        role="assistant",
+                        content=lead_text,
+                        thinking_text=recipe_thinking,
+                        run_id=None,
+                    )
+                    session.add(message)
+                    session.commit()
+                    message_id = message.id
+                yield _sse(
+                    "done",
+                    {
+                        "session_id": session_id,
+                        "message_id": message_id,
+                        "needs_input": False,
+                        "provider": None,
+                        "route": "kitchen_recipe",
+                        "search_query": search_query,
+                        "search_queries": [search_query],
+                    },
+                )
+                return
+            # 全部落空(本地库无菜名与食材命中,实时搜索也无结果)→ LLM 通用做法兜底
             yield _status(
                 "search_recipe_candidates",
                 "检索菜谱库",
                 "done",
                 f"本地库与实时搜索均未命中「{dish_name}」，改用通用做法生成",
             )
-            dish_name = _dish_name_from_text(user_text)
             text_parts: list[str] = []
             thinking_parts: list[str] = []
             llm_parts: list[str] = []
