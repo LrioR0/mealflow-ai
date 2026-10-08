@@ -1,288 +1,165 @@
-"""受控的对话工具循环。
-
-这里的模型只负责决定是否读取只读家庭数据、何时停止并组织回答；配餐过滤、
-评分、换算和所有写操作仍由确定性业务工作流负责。
-"""
+"""受控、可观测的对话工具循环。"""
+from __future__ import annotations
 
 import json
+import logging
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+from sqlalchemy.exc import OperationalError
+
 from app.llm.provider import LLMProvider
 from app.schemas.agent import ToolTraceView
-from app.services.context_loader import PlanningContext, load_planning_context
+from app.services.context_loader import PlanningContext, RecipeContext, load_planning_context
 
+logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """你是 MealFlow 的家庭厨房对话 Agent。
-你可以通过工具读取家庭成员限制、冰箱库存、本地菜谱和历史偏好，再基于工具结果回答。
-只有信息确实需要时才调用工具；绝不编造库存、家庭限制、历史偏好或菜谱命中。
-工具全部只读：你不能修改库存、创建采购单、发布餐单或绕过人工确认。
-需要正式配餐时，先向用户清晰总结你已知的人数、时段、偏好和限制，并请用户确认生成正式餐单。
-回答使用简洁自然的简体中文。"""
+_SYSTEM_PROMPT = """你是 MealFlow 的家庭厨房对话 Agent。你可以读取家庭限制、冰箱、本地菜谱和历史偏好。只能使用工具已返回的事实，绝不编造库存、限制或菜谱。
+如果用户肯定上一轮你提出的“帮你查某道菜/菜谱”建议，必须从会话上下文提取菜名并调用菜谱工具，不能重复提问。
+推荐时优先给出依据现有食材能做的菜和做法。缺少非辅料主料不是拒答理由：仍给出完整做法，并把缺项作为可选采购建议；不要要求用户先补货。常备料默认可用，但过敏或忌口不能绕过。你不能写库存、创建采购单或发布餐单。使用简洁自然的简体中文。"""
 
+TOOL_META = {
+    "get_member_constraints": ("检查用餐限制", "当前家庭成员的饮食限制"),
+    "get_inventory_summary": ("读取冰箱库存", "可用食材与临期食材"),
+    "search_recipes": ("检索本地菜谱", "查询“{query}”"),
+    "get_recipe_detail": ("读取菜谱做法", "查看“{recipe}”的食材和步骤"),
+    "check_recipe_availability": ("核对食材可用性", "核对“{recipe}”的库存与缺项"),
+    "get_preference_summary": ("读取家庭偏好", "历史评分与偏好"),
+}
 
-TOOL_DEFINITIONS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_member_constraints",
-            "description": "读取当前用餐成员的过敏、忌口和特殊状态。涉及能不能吃、安排一餐或推荐菜时使用。",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_inventory_summary",
-            "description": "读取冰箱中的可用食材和临期食材。用户询问库存、根据现有食材做菜时使用。",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_recipes",
-            "description": "在本地菜谱库中按菜名、食材或口味检索菜谱摘要。",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "菜名、食材或口味关键词"}},
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_preference_summary",
-            "description": "读取已记录的菜品评分和偏好摘要。需要根据家庭历史偏好推荐时使用。",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-        },
-    },
+def _tool(name: str, description: str, properties: dict[str, Any] | None = None, required: list[str] | None = None) -> dict[str, Any]:
+    return {"type": "function", "function": {"name": name, "description": description, "parameters": {"type": "object", "properties": properties or {}, "required": required or [], "additionalProperties": False}}}
+
+TOOL_DEFINITIONS = [
+    _tool("get_member_constraints", "读取当前用餐成员的过敏、忌口和特殊状态。"),
+    _tool("get_inventory_summary", "读取冰箱中的可用和临期食材。"),
+    _tool("search_recipes", "按菜名、食材或口味检索本地菜谱。", {"query": {"type": "string"}}, ["query"]),
+    _tool("get_recipe_detail", "按菜谱 ID 或名称读取完整食材、步骤和份量。", {"recipe": {"type": "string"}}, ["recipe"]),
+    _tool("check_recipe_availability", "核对一道菜的主料库存、缺少主料、常备辅料和限制。", {"recipe": {"type": "string"}}, ["recipe"]),
+    _tool("get_preference_summary", "读取已记录的菜品评分和偏好摘要。"),
 ]
-
 
 @dataclass
 class ConversationTurn:
     text: str
     traces: list[ToolTraceView] = field(default_factory=list)
     tool_results: list[dict[str, Any]] = field(default_factory=list)
-
+    procurement_suggestions: list[dict[str, Any]] = field(default_factory=list)
 
 def _load_context(workspace_id: str, site_id: str, meal_service_id: str) -> PlanningContext:
     from app.db.session import SessionLocal
-
     with SessionLocal() as session:
         return load_planning_context(session, workspace_id, site_id, meal_service_id)
 
+def _recipe(context: PlanningContext, value: str) -> RecipeContext:
+    value = value.strip().lower()
+    for item in context.recipes:
+        if item.id == value or item.name.lower() == value or value in item.name.lower(): return item
+    raise ValueError("未找到对应本地菜谱")
 
-def _restrict_constraints(context: PlanningContext, diner_ids: list[str] | None) -> list[Any]:
-    if not diner_ids:
-        return context.member_constraints
-    selected = set(diner_ids)
-    return [item for item in context.member_constraints if not item.user_id or item.user_id in selected]
+def _availability(recipe: RecipeContext, context: PlanningContext, diner_ids: list[str] | None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    restricted = {r.ingredient_key for r in context.member_constraints if r.ingredient_key and (not diner_ids or not r.user_id or r.user_id in diner_ids)}
+    groups: dict[str, list[dict[str, Any]]] = {x: [] for x in ("available_main_ingredients", "missing_main_ingredients", "pantry_staples", "optional_ingredients", "restricted_ingredients")}
+    suggestions: list[dict[str, Any]] = []
+    for line in recipe.ingredients:
+        row = {"key": line.key, "name": line.name, "quantity": str(line.quantity), "unit": line.unit}
+        if line.key in restricted: groups["restricted_ingredients"].append(row)
+        elif line.optional: groups["optional_ingredients"].append(row)
+        elif line.key in context.pantry_keys: groups["pantry_staples"].append(row)
+        elif context.available_for(line.key) > 0: groups["available_main_ingredients"].append(row)
+        else:
+            groups["missing_main_ingredients"].append(row)
+            suggestions.append({"ingredient": line.name, "quantity": str(line.quantity), "unit": line.unit, "recipe_id": recipe.id, "recipe_name": recipe.name, "source_id": f"chat:{recipe.id}", "reason": f"制作{recipe.name}缺少的主料"})
+    return {"recipe_id": recipe.id, "recipe_name": recipe.name, **groups, "can_cook_without_purchase": not groups["missing_main_ingredients"] and not groups["restricted_ingredients"]}, suggestions
 
+def _run_tool(name: str, args: dict[str, Any], context: PlanningContext, diner_ids: list[str] | None) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
+    if name == "get_member_constraints":
+        rows = [r.summary for r in context.member_constraints if not diner_ids or not r.user_id or r.user_id in diner_ids]
+        return {"constraints": rows, "count": len(rows)}, "未发现生效限制" if not rows else "；".join(rows), []
+    if name == "get_inventory_summary":
+        today = date.today(); items = [{"name": x.name, "quantity": str(x.quantity), "unit": x.unit, "expiring": x.key in context.expiring_keys(today)} for x in context.inventory]
+        return {"items": items[:20], "total": len(items), "expiring": [x["name"] for x in items if x["expiring"]]}, f"{len(items)} 项可用库存", []
+    if name == "search_recipes":
+        query = str(args.get("query", "")).strip().lower()
+        if not query: raise ValueError("缺少 query")
+        matches = [r for r in context.recipes if query in " ".join([r.name, *r.tags, *r.taste_tags, *(x.name for x in r.ingredients)]).lower()]
+        return {"query": query, "recipes": [{"id": r.id, "name": r.name, "duration_minutes": r.duration_minutes, "ingredients": [x.name for x in r.ingredients]} for r in matches[:8]], "total": len(matches)}, f"“{query}”命中 {len(matches)} 道菜谱", []
+    if name in {"get_recipe_detail", "check_recipe_availability"}:
+        recipe = _recipe(context, str(args.get("recipe", ""))); availability, suggestions = _availability(recipe, context, diner_ids)
+        if name == "check_recipe_availability": return availability, f"{recipe.name}：{len(availability['missing_main_ingredients'])} 项非辅料缺项，{len(availability['pantry_staples'])} 项常备料", suggestions
+        result = {"id": recipe.id, "name": recipe.name, "servings": recipe.servings, "duration_minutes": recipe.duration_minutes, "ingredients": [{"key": x.key, "name": x.name, "quantity": str(x.quantity), "unit": x.unit, "optional": x.optional, "is_pantry_staple": x.key in context.pantry_keys} for x in recipe.ingredients], "steps": recipe.steps, "availability": availability}
+        return result, f"已读取《{recipe.name}》的食材与 {len(recipe.steps)} 个步骤", suggestions
+    if name == "get_preference_summary":
+        rows = [{"dish": n, "rating": v.avg_rating, "count": v.sample_count, "tags": v.top_tags} for n, v in context.dish_feedback.items()]
+        return {"preferences": rows[:10], "total": len(rows)}, "暂无历史偏好记录" if not rows else f"读取到 {len(rows)} 条历史偏好", []
+    raise ValueError(f"不允许调用工具：{name}")
 
-def _tool_result(
-    tool_name: str,
-    arguments: dict[str, Any],
-    context: PlanningContext,
-    diner_ids: list[str] | None,
-) -> tuple[dict[str, Any], str]:
-    """执行固定白名单工具；返回机器结果和可展示的摘要。"""
-    if tool_name == "get_member_constraints":
-        rows = _restrict_constraints(context, diner_ids)
-        result = {"constraints": [row.summary for row in rows], "count": len(rows)}
-        return result, "未发现生效限制" if not rows else "；".join(result["constraints"])
+def _calls(response: dict[str, Any]) -> list[dict[str, Any]]:
+    return [x for x in response.get("tool_calls") or [] if isinstance(x, dict) and isinstance(x.get("function"), dict)]
 
-    if tool_name == "get_inventory_summary":
-        today = date.today()
-        items = [
-            {"name": line.name, "quantity": str(line.quantity), "unit": line.unit, "expiring": line.key in context.expiring_keys(today)}
-            for line in context.inventory
-        ]
-        result = {"items": items[:20], "total": len(items), "expiring": [item["name"] for item in items if item["expiring"]]}
-        detail = "、".join(result["expiring"]) or "无临期食材"
-        return result, f"{len(items)} 项可用库存，临期：{detail}"
+def _trace(name: str, status: str, args: dict[str, Any], **extra: Any) -> ToolTraceView:
+    label, template = TOOL_META.get(name, ("读取家庭数据", "执行查询"))
+    try:
+        summary = template.format(**args) if status == "running" else label
+    except KeyError:
+        summary = label
+    return ToolTraceView(tool_name=name, status=status, input_summary=summary, **extra)
 
-    if tool_name == "search_recipes":
-        query = str(arguments.get("query", "")).strip().lower()
-        if not query:
-            raise ValueError("缺少 query")
-        matches = []
-        for recipe in context.recipes:
-            haystack = " ".join(
-                [recipe.name, *recipe.tags, *recipe.taste_tags, *(line.name for line in recipe.ingredients)]
-            ).lower()
-            if query in haystack:
-                matches.append(
-                    {
-                        "id": recipe.id,
-                        "name": recipe.name,
-                        "duration_minutes": recipe.duration_minutes,
-                        "tags": recipe.tags[:4],
-                        "ingredients": [line.name for line in recipe.ingredients[:8]],
-                    }
-                )
-        result = {"query": query, "recipes": matches[:8], "total": len(matches)}
-        return result, f"“{query}”命中 {len(matches)} 道菜谱"
+def _tool_error(exc: Exception) -> tuple[str, str]:
+    """前端拿到可行动信息，服务端日志保留原始堆栈。"""
+    if isinstance(exc, OperationalError):
+        return ("数据库暂不可用或结构未升级；请执行数据库迁移后重启服务", "database_operational_error")
+    return (f"工具执行失败：{type(exc).__name__}", "tool_execution_failed")
 
-    if tool_name == "get_preference_summary":
-        rows = [
-            {"dish": name, "rating": stats.avg_rating, "count": stats.sample_count, "tags": stats.top_tags}
-            for name, stats in context.dish_feedback.items()
-        ]
-        result = {"preferences": rows[:10], "total": len(rows)}
-        return result, "暂无历史偏好记录" if not rows else f"读取到 {len(rows)} 条历史偏好"
-
-    raise ValueError(f"不允许调用工具：{tool_name}")
-
-
-def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
-    """OpenAI-compatible chat_completions 返回 message.tool_calls。"""
-    calls = response.get("tool_calls") or []
-    return [call for call in calls if isinstance(call, dict) and isinstance(call.get("function"), dict)]
-
-
-async def run_conversation_agent(
-    *,
-    provider: LLMProvider | None,
-    workspace_id: str,
-    site_id: str,
-    meal_service_id: str,
-    diner_ids: list[str] | None,
-    user_text: str,
-    history: list[dict[str, str]],
-    max_steps: int,
-    on_tool: Callable[[ToolTraceView], None] | None = None,
-) -> ConversationTurn | None:
-    """运行有限步骤的只读工具循环。
-
-    ``None`` 表示 Provider 不可用或协议不兼容，调用方应走现有确定性降级分支。
-    """
-    if provider is None:
-        return None
-
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        *history,
-        {"role": "user", "content": user_text},
-    ]
-    context: PlanningContext | None = None
-    traces: list[ToolTraceView] = []
-    results: list[dict[str, Any]] = []
-    steps = max(1, min(max_steps, 6))
-    tool_actions = 0
-
-    for _ in range(steps):
-        try:
-            response = await provider.chat_with_tools(messages=messages, tools=TOOL_DEFINITIONS)
-        except Exception:
-            return None
-        calls = _extract_tool_calls(response)
+async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_id: str, site_id: str, meal_service_id: str, diner_ids: list[str] | None, user_text: str, history: list[dict[str, str]], max_steps: int) -> AsyncIterator[dict[str, Any]]:
+    if provider is None: yield {"type": "fallback"}; return
+    messages: list[dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}, *history, {"role": "user", "content": user_text}]
+    context: PlanningContext | None = None; traces: list[ToolTraceView] = []; results: list[dict[str, Any]] = []; suggestions: list[dict[str, Any]] = []; limit = max(1, min(max_steps, 6)); actions = 0
+    while True:
+        yield {"type": "status", "step": "agent_decide", "label": "判断下一步", "state": "running"}
+        try: response = await provider.chat_with_tools(messages=messages, tools=TOOL_DEFINITIONS)
+        except Exception: yield {"type": "fallback"}; return
+        yield {"type": "status", "step": "agent_decide", "label": "判断下一步", "state": "done", "detail": "已获得下一步决策"}
+        calls = _calls(response)
         if not calls:
             text = str(response.get("content") or "").strip()
-            return ConversationTurn(text=text, traces=traces, tool_results=results) if text else None
-
-        # 同一轮可以并行请求几个相互独立的只读工具；每个都必须返回结果。
-        # 保留 reasoning_content 是 DeepSeek/GLM 等思考模型继续 tool loop 的必要协议字段。
-        assistant_message = {
-            "role": response.get("role") or "assistant",
-            "content": response.get("content") or "",
-            "tool_calls": calls,
-        }
-        if response.get("reasoning_content"):
-            assistant_message["reasoning_content"] = response["reasoning_content"]
-        messages.append(assistant_message)
-
+            yield {"type": "final", "turn": ConversationTurn(text, traces, results, suggestions)} if text else {"type": "fallback"}; return
+        assistant = {"role": response.get("role") or "assistant", "content": response.get("content") or "", "tool_calls": calls}
+        if response.get("reasoning_content"): assistant["reasoning_content"] = response["reasoning_content"]
+        messages.append(assistant)
         for call in calls:
-            function = call["function"]
-            tool_name = str(function.get("name", ""))
-            if tool_actions >= steps:
-                result = {"error": "本轮只读工具调用已达上限，请根据已有结果作答"}
-                trace = ToolTraceView(
-                    tool_name=tool_name or "unknown",
-                    status="error",
-                    input_summary="已达工具调用上限",
-                    output_summary=result["error"],
-                    error_code="tool_limit_reached",
-                )
-                traces.append(trace)
-                results.append({"tool_name": trace.tool_name, "status": trace.status, "summary": trace.output_summary})
-                if on_tool:
-                    on_tool(trace)
-                messages.append(
-                    {"role": "tool", "tool_call_id": str(call.get("id") or tool_name), "content": json.dumps(result, ensure_ascii=False)}
-                )
-                continue
-            try:
-                arguments = json.loads(function.get("arguments") or "{}")
-                if not isinstance(arguments, dict):
-                    raise ValueError("工具参数必须是对象")
-            except (json.JSONDecodeError, ValueError) as exc:
-                arguments = {}
-                result: dict[str, Any] = {"error": f"参数无效：{exc}"}
-                summary = result["error"]
-                trace = ToolTraceView(tool_name=tool_name or "unknown", status="error", input_summary="参数解析", output_summary=summary, error_code="invalid_arguments")
+            fn = call["function"]; name = str(fn.get("name") or "unknown")
+            try: args = json.loads(fn.get("arguments") or "{}"); assert isinstance(args, dict)
+            except Exception: args = {}
+            if actions >= limit:
+                result = {"error": "本轮工具调用已达上限，请依据已有结果作答"}; done = _trace(name, "error", args, output_summary=result["error"], error_code="tool_limit_reached")
             else:
-                started = time.perf_counter()
+                yield {"type": "tool", "trace": _trace(name, "running", args, output_summary="正在读取")}
+                started = time.perf_counter(); actions += 1
                 try:
-                    if context is None:
-                        context = _load_context(workspace_id, site_id, meal_service_id)
-                    result, summary = _tool_result(tool_name, arguments, context, diner_ids)
-                    trace = ToolTraceView(
-                        tool_name=tool_name,
-                        status="success",
-                        duration_ms=round((time.perf_counter() - started) * 1000),
-                        input_summary=json.dumps(arguments, ensure_ascii=False),
-                        output_summary=summary,
-                    )
+                    if context is None: context = _load_context(workspace_id, site_id, meal_service_id)
+                    result, summary, new = _run_tool(name, args, context, diner_ids); suggestions.extend(new)
+                    done = _trace(name, "success", args, duration_ms=round((time.perf_counter()-started)*1000), output_summary=summary)
                 except Exception as exc:
-                    result = {"error": f"工具执行失败：{type(exc).__name__}"}
-                    trace = ToolTraceView(
-                        tool_name=tool_name or "unknown",
-                        status="error",
-                        duration_ms=round((time.perf_counter() - started) * 1000),
-                        input_summary=json.dumps(arguments, ensure_ascii=False),
-                        output_summary=result["error"],
-                        error_code="tool_execution_failed",
-                    )
-            traces.append(trace)
-            tool_actions += 1
-            results.append({"tool_name": trace.tool_name, "status": trace.status, "summary": trace.output_summary})
-            if on_tool:
-                on_tool(trace)
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": str(call.get("id") or tool_name),
-                    "content": json.dumps(result, ensure_ascii=False),
-                }
-            )
-
-        if tool_actions >= steps:
+                    logger.exception("对话工具执行失败：%s", name)
+                    message, error_code = _tool_error(exc)
+                    result = {"error": message}; done = _trace(name, "error", args, duration_ms=round((time.perf_counter()-started)*1000), output_summary=message, error_code=error_code)
+            traces.append(done); results.append({"tool_name": name, "status": done.status, "summary": done.output_summary}); yield {"type": "tool", "trace": done}
+            messages.append({"role": "tool", "tool_call_id": str(call.get("id") or name), "content": json.dumps(result, ensure_ascii=False)})
+        if actions >= limit:
             try:
-                text = await provider.chat(
-                    messages=[
-                        *messages,
-                        {
-                            "role": "system",
-                            "content": "本轮工具调用额度已用尽。请只依据已有工具结果立即给出最终回答，不要继续请求工具。",
-                        },
-                    ]
-                )
-                if text.strip():
-                    return ConversationTurn(text=text.strip(), traces=traces, tool_results=results)
-            except Exception:
-                pass
-            break
+                text = (await provider.chat(messages=[*messages, {"role": "system", "content": "工具额度已用尽。请立即依据已有结果作答，不得继续调用工具。"}])).strip()
+                if text: yield {"type": "final", "turn": ConversationTurn(text, traces, results, suggestions)}; return
+            except Exception: pass
+            yield {"type": "final", "turn": ConversationTurn("我已完成本轮查询。为避免重复查询，请告诉我你想优先决定哪一点。", traces, results, suggestions)}; return
 
-    # 上限不是失败：让用户知道没有继续展开，避免循环无限消耗。
-    return ConversationTurn(
-        text="我已经完成了本轮可用信息查询。为了避免重复查询，请告诉我你想优先决定哪一点。",
-        traces=traces,
-        tool_results=results,
-    )
+async def run_conversation_agent(**kwargs: Any) -> ConversationTurn | None:
+    callback: Callable[[ToolTraceView], None] | None = kwargs.pop("on_tool", None)
+    async for event in stream_conversation_agent(**kwargs):
+        if event["type"] == "tool" and event["trace"].status != "running" and callback: callback(event["trace"])
+        if event["type"] == "final": return event["turn"]
+        if event["type"] == "fallback": return None
+    return None

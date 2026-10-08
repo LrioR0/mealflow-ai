@@ -71,6 +71,17 @@ class WorkspaceMember(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(32), default="active")
 
 
+class HouseholdPantryConfig(TimestampMixin, Base):
+    """工作区级常备料覆盖；默认项不必逐条落库。"""
+
+    __tablename__ = "household_pantry_configs"
+
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), primary_key=True)
+    use_defaults: Mapped[bool] = mapped_column(Boolean, default=True)
+    disabled_default_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
+    custom_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
 class DietaryRestriction(TimestampMixin, Base):
     __tablename__ = "dietary_restrictions"
 

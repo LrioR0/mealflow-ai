@@ -24,6 +24,7 @@ from app.db.models import (
     Workspace,
     WorkspaceMember,
 )
+from app.services.pantry import effective_pantry_keys
 
 EXPIRING_WINDOW_DAYS = 2
 
@@ -116,6 +117,7 @@ class PlanningContext:
     # 数据字典:用餐限制区分 allergy / dislike,均进入硬过滤;用于解释来源
     restriction_types: dict[str, str] = field(default_factory=dict)
     dish_feedback: dict[str, "DishFeedbackStats"] = field(default_factory=dict)
+    pantry_keys: set[str] = field(default_factory=set)
 
     def expiring_keys(self, today: date) -> set[str]:
         return {line.key for line in self.inventory if line.is_expiring(today)}
@@ -295,4 +297,5 @@ def load_planning_context(
         member_constraints=member_constraints,
         excluded_keys=excluded_keys,
         restriction_types=restriction_types,
+        pantry_keys=effective_pantry_keys(session, workspace.id),
     )

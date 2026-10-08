@@ -107,6 +107,16 @@ async def test_golden_sample_a_named_dish_with_budget() -> None:
         item["step"] == "parse_request" and item["state"] == "done"
         for item in status_items
     )
+    # 请求解析只覆盖输入规范化，必须在后续路由/工具活动前结束，不能悬挂在顶部。
+    parse_done_index = next(
+        index for index, item in enumerate(status_items)
+        if item["step"] == "parse_request" and item["state"] == "done"
+    )
+    route_running_index = next(
+        index for index, item in enumerate(status_items)
+        if item["step"] == "route_request" and item["state"] == "running"
+    )
+    assert parse_done_index < route_running_index
 
     done = _single(events, "done")
     assert done["session_id"]

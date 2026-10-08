@@ -14,7 +14,7 @@ import {
   type MemberPayload,
   type RestrictionType,
 } from '../../api/members'
-import { fetchHousehold, type Household, type HouseholdMember } from '../../api/chat'
+import { fetchHousehold, fetchPantryConfig, updatePantryConfig, type Household, type HouseholdMember, type PantryConfig } from '../../api/chat'
 import { fetchIngredients, type IngredientOption } from '../../api/inventory'
 
 defineOptions({ name: 'MembersView' })
@@ -24,6 +24,8 @@ const ingredients = ref<IngredientOption[]>([])
 const loading = ref(true)
 const activeFilter = ref<'all' | 'resident' | 'guest'>('all')
 const searchText = ref('')
+const pantryConfig = ref<PantryConfig | null>(null)
+const pantryDraft = ref('')
 
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
@@ -329,12 +331,21 @@ async function remove(member: HouseholdMember) {
 async function load() {
   loading.value = true
   try {
-    const [home, options] = await Promise.all([fetchHousehold(), fetchIngredients()])
+    const [home, options, pantry] = await Promise.all([fetchHousehold(), fetchIngredients(), fetchPantryConfig()])
     household.value = home
     ingredients.value = options
+    pantryConfig.value = pantry
   } finally {
     loading.value = false
   }
+}
+
+async function savePantry() {
+  if (!pantryConfig.value) return
+  const custom = pantryDraft.value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean)
+  pantryConfig.value = await updatePantryConfig({ ...pantryConfig.value, custom_keys: [...new Set([...pantryConfig.value.custom_keys, ...custom])] })
+  pantryDraft.value = ''
+  ElMessage.success('常备料设置已保存')
 }
 
 onMounted(load)
@@ -363,6 +374,19 @@ onMounted(load)
       <span class="legend"><i class="dot orange"></i>长期 · 忌口偏好</span>
       <span class="legend"><i class="dot yellow"></i>临时 · 特殊事件(带生效期)</span>
     </div>
+
+    <section v-if="pantryConfig" class="pantry-card">
+      <div>
+        <strong>厨房常备料</strong>
+        <p>常备料不需要录入冰箱，也不会自动加入采购清单；仍会参与过敏与忌口校验。</p>
+      </div>
+      <div class="pantry-controls">
+        <el-switch v-model="pantryConfig.use_defaults" active-text="启用默认库" @change="savePantry" />
+        <el-input v-model="pantryDraft" size="small" placeholder="新增自定义项，如：黄油、孜然" @keyup.enter="savePantry" />
+        <el-button size="small" @click="savePantry">保存</el-button>
+      </div>
+      <div class="pantry-tags"><el-tag v-for="key in pantryConfig.effective_keys" :key="key" size="small" effect="plain">{{ key }}</el-tag></div>
+    </section>
 
     <div class="filter-bar">
       <el-input v-model="searchText" :prefix-icon="Search" clearable placeholder="搜索姓名、忌口或备注" />
@@ -691,6 +715,11 @@ onMounted(load)
 @keyframes blink { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 
 .empty-state { grid-column: 1 / -1; }
+.pantry-card { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(300px, 1.2fr); gap: 12px 20px; margin: 0 0 14px; padding: 14px 16px; border: 1px solid #d9e6df; border-radius: 12px; background: #fbfdfb; }
+.pantry-card p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.pantry-controls { display: flex; align-items: center; gap: 8px; }
+.pantry-controls .el-input { flex: 1; }
+.pantry-tags { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 5px; }
 
 .tab-hint { margin: 0 0 14px; font-size: 12.5px; color: var(--muted); line-height: 1.7; }
 .draft-row { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
@@ -700,5 +729,6 @@ onMounted(load)
 
 @media (max-width: 1180px) {
   .card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pantry-card { grid-template-columns: 1fr; }
 }
 </style>

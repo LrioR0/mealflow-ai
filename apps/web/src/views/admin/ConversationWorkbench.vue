@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { generateProcurement } from '../../composables/procurement'
+import { createProcurementItem, fetchProcurement, generateProcurement } from '../../composables/procurement'
 import { useAgentHandoffStore } from '../../stores/agentHandoff'
 
-import { ArrowDown, Check, Delete, User } from '@element-plus/icons-vue'
+import { ArrowDown, Delete, User } from '@element-plus/icons-vue'
 
 import {
   conversationStarted,
@@ -31,7 +31,7 @@ interface StatusStep {
   step: string
   /** 后端按本次工具调用动态生成的步骤名,优先于本地标签表显示 */
   label?: string
-  state: 'running' | 'done'
+  state: 'running' | 'done' | 'error'
   detail: string
 }
 
@@ -66,6 +66,17 @@ interface ToolCallTrace {
   error_code?: string | null
 }
 
+interface ProcurementSuggestion {
+  ingredient: string
+  quantity: string
+  unit: string
+  recipe_id: string
+  recipe_name: string
+  source_id: string
+  reason: string
+  added?: boolean
+}
+
 interface ChatBubble {
   id: string
   role: 'user' | 'assistant'
@@ -85,6 +96,8 @@ interface ChatBubble {
   webQuery?: string
   webRecipes?: WebRecipeItem[]
   toolCalls?: ToolCallTrace[]
+  toolTraceOpen?: boolean
+  procurementSuggestions?: ProcurementSuggestion[]
   thinkingOpen?: boolean
 }
 
@@ -97,6 +110,10 @@ const STEP_LABELS: Record<string, string> = {
   get_inventory_summary: '读取冰箱库存',
   get_preference_summary: '读取家庭偏好',
   search_recipes: '检索本地菜谱',
+  get_recipe_detail: '读取菜谱做法',
+  check_recipe_availability: '核对食材可用性',
+  agent_decide: '判断下一步',
+  route_request: '判断处理方式',
   search_recipe_candidates: '召回菜谱',
   filter_hard_constraints: '过滤硬约束',
   score_menu_options: '方案评分',
@@ -422,8 +439,20 @@ function polishClarification(text: string): string {
   return polished
 }
 
-function allStepsDone(bubble: ChatBubble): boolean {
-  return bubble.steps.length > 0 && bubble.steps.every((step) => step.state === 'done')
+function activeStep(bubble: ChatBubble): StatusStep | undefined {
+  return [...bubble.steps].reverse().find((step) => step.state === 'running')
+}
+
+function traceSummary(bubble: ChatBubble): string {
+  const traces = (bubble.toolCalls ?? []).filter((trace) => trace.status !== 'running')
+  const successful = [...new Set(traces.filter((trace) => trace.status === 'success').map((trace) => stepLabel({ step: trace.tool_name, state: 'done', detail: '' })))]
+  const failed = traces.filter((trace) => trace.status === 'error').length
+  const base = successful.length ? `已读取 ${successful.join('、')}` : '本轮未读取额外信息'
+  return failed ? `${base} · ${failed} 项未完成` : base
+}
+
+function traceHasIssue(bubble: ChatBubble): boolean {
+  return (bubble.toolCalls ?? []).some((trace) => trace.status === 'error')
 }
 
 async function toggleRecipe(dish: string, plan: AgentRun | null) {
@@ -558,7 +587,8 @@ async function send(preset?: string) {
       } else if (event.event === 'status') {
         const step = String(event.data.step ?? '')
         const label = String(event.data.label ?? '')
-        const state = event.data.state === 'running' ? 'running' : 'done'
+        const rawState = String(event.data.state ?? '')
+        const state: StatusStep['state'] = rawState === 'running' ? 'running' : rawState === 'error' ? 'error' : 'done'
         const detail = String(event.data.detail ?? '')
         if (state === 'running') {
           assistant.steps.push({ step, label, state, detail: '' })
@@ -568,9 +598,9 @@ async function send(preset?: string) {
             .findIndex((item) => item.step === step && item.state === 'running')
           if (reverseIdx >= 0) {
             const real = assistant.steps.length - 1 - reverseIdx
-            assistant.steps[real] = { step, label: label || assistant.steps[real].label, state: 'done', detail }
+            assistant.steps[real] = { step, label: label || assistant.steps[real].label, state, detail }
           } else {
-            assistant.steps.push({ step, label, state: 'done', detail })
+            assistant.steps.push({ step, label, state, detail })
           }
         }
       } else if (event.event === 'text') {
@@ -578,7 +608,12 @@ async function send(preset?: string) {
         assistant.thinkingDone = true
       } else if (event.event === 'tool_call') {
         assistant.toolCalls ??= []
-        assistant.toolCalls.push(event.data as unknown as ToolCallTrace)
+        const trace = event.data as unknown as ToolCallTrace
+        const running = assistant.toolCalls.findIndex((item) => item.tool_name === trace.tool_name && item.status === 'running')
+        if (running >= 0 && trace.status !== 'running') assistant.toolCalls[running] = trace
+        else assistant.toolCalls.push(trace)
+      } else if (event.event === 'procurement_suggestions') {
+        assistant.procurementSuggestions = (event.data.items as ProcurementSuggestion[]) ?? []
       } else if (event.event === 'plan') {
         assistant.thinkingDone = true
         assistant.plan = event.data as unknown as AgentRun
@@ -625,6 +660,19 @@ async function send(preset?: string) {
     })
     sending.value = false
     scrollBottom()
+  }
+}
+
+async function addSuggestion(item: ProcurementSuggestion) {
+  try {
+    const existing = await fetchProcurement()
+    if (!existing.some((row) => row.sourceId === item.source_id && row.ingredient === item.ingredient)) {
+      await createProcurementItem({ ingredient: item.ingredient, quantity: item.quantity, unit: item.unit, checked: false, source: 'agent', sourceId: item.source_id })
+    }
+    item.added = true
+    ElMessage.success(`${item.ingredient} 已加入采购清单`)
+  } catch {
+    ElMessage.error('加入采购清单失败，请稍后重试')
   }
 }
 
@@ -724,42 +772,43 @@ function stopGeneration() {
                 <pre v-show="bubble.thinkingOpen" class="thinking-text">{{ bubble.thinking }}</pre>
               </div>
 
-              <!-- 思索步骤只在流式期间展示,回答完成后全部路由隐藏 -->
-              <ol v-if="bubble.streaming && bubble.steps.length" class="tool-steps">
-                <li
-                  v-for="(stepItem, index) in bubble.steps"
-                  :key="index"
-                  :class="{ running: stepItem.state === 'running' }"
-                >
-                  <template v-if="stepItem.state === 'running'">
-                    <span class="mini-spinner"></span>
-                    <span class="running-label">{{ stepLabel(stepItem) }}…</span>
-                  </template>
-                  <template v-else>
-                    <span class="step-check"><el-icon><Check /></el-icon></span>
-                    <span class="step-name">{{ stepLabel(stepItem) }}</span>
-                    <small v-if="stepItem.detail" class="step-detail">{{ stepItem.detail }}</small>
-                  </template>
-                </li>
-              </ol>
+              <!-- 只突出当前真实动作；历史工具信息在完成后按需展开，避免占满对话。 -->
+              <div v-if="bubble.streaming && activeStep(bubble)" class="activity-bar">
+                <span class="mini-spinner"></span>
+                <span class="activity-label">{{ stepLabel(activeStep(bubble)!) }}</span>
+                <small>{{ activeStep(bubble)?.detail || '正在处理…' }}</small>
+              </div>
 
-              <div v-if="!bubble.streaming && bubble.toolCalls?.length" class="tool-trace-card">
-                <strong>本轮已读取</strong>
-                <ul>
+              <div v-if="!bubble.streaming && bubble.toolCalls?.length" class="tool-trace-card" :class="{ issue: traceHasIssue(bubble) }">
+                <button class="trace-summary" type="button" @click="bubble.toolTraceOpen = !bubble.toolTraceOpen">
+                  <span :class="traceHasIssue(bubble) ? 'trace-mark issue' : 'trace-mark'">{{ traceHasIssue(bubble) ? '!' : '✓' }}</span>
+                  <span>{{ traceSummary(bubble) }}</span>
+                  <span class="trace-expand">{{ bubble.toolTraceOpen ? '收起' : '查看过程' }}</span>
+                </button>
+                <ul v-if="bubble.toolTraceOpen">
                   <li v-for="(trace, index) in bubble.toolCalls" :key="`${trace.tool_name}-${index}`">
-                    <span :class="{ failed: trace.status !== 'success' }">{{ trace.status === 'success' ? '✓' : '!' }}</span>
+                    <span :class="{ failed: trace.status === 'error' }">{{ trace.status === 'success' ? '✓' : '!' }}</span>
                     <b>{{ stepLabel({ step: trace.tool_name, state: 'done', detail: '' }) }}</b>
-                    <small>{{ trace.output_summary }}</small>
+                    <small>{{ trace.output_summary }}<template v-if="trace.duration_ms"> · {{ trace.duration_ms }}ms</template></small>
                   </li>
                 </ul>
               </div>
 
+              <div v-if="bubble.procurementSuggestions?.length" class="procurement-suggestions">
+                <strong>缺少的主料（可选）</strong>
+                <p>常备辅料已单独标注，不会加入采购清单。</p>
+                <div v-for="item in bubble.procurementSuggestions" :key="`${item.source_id}-${item.ingredient}`" class="procurement-suggestion-row">
+                  <span>{{ item.ingredient }} <small>{{ item.quantity }}{{ item.unit }}</small></span>
+                  <button type="button" :disabled="item.added" @click="addSuggestion(item)">{{ item.added ? '已加入' : '加入采购清单' }}</button>
+                </div>
+              </div>
+
               <div
-                v-if="bubble.streaming && !bubble.content && !bubble.error && (bubble.thinkingDone || allStepsDone(bubble))"
+                v-if="bubble.streaming && !bubble.content && !bubble.error && !activeStep(bubble)"
                 class="response-placeholder"
               >
                 <span class="response-placeholder-dot"></span>
-                <span>{{ allStepsDone(bubble) ? '食材与约束检查已完成，正在整理建议…' : '正在整理用餐建议，回复即将呈现…' }}</span>
+                <span>正在整理建议，回复即将呈现…</span>
               </div>
 
 
@@ -1092,7 +1141,7 @@ function stopGeneration() {
 }
 .chat-panel {
   width: 100%;
-  max-width: 880px;
+  max-width: 820px;
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
@@ -1102,14 +1151,15 @@ function stopGeneration() {
 .session-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  padding: 2px 0 8px;
 }
 .new-session-btn {
   flex-shrink: 0;
   padding: 7px 14px;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  background: #fff;
+  border-radius: 8px;
+  background: transparent;
   color: var(--green);
   font-size: 12.5px;
   font-weight: 650;
@@ -1127,10 +1177,10 @@ function stopGeneration() {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 7px 13px;
+  padding: 7px 11px;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.85);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.68);
   cursor: pointer;
   transition: border-color 0.15s ease;
 }
@@ -1259,8 +1309,8 @@ function stopGeneration() {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
-  padding: 0.4rem 14px 0.4rem 0.2rem;
+  gap: 0.8rem;
+  padding: 0.35rem 12px 0.5rem 0.1rem;
   scrollbar-gutter: stable;
 }
 .chat-list::-webkit-scrollbar { width: 8px; }
@@ -1311,7 +1361,7 @@ function stopGeneration() {
 }
 .assistant-block {
   width: 100%;
-  padding: 0.1rem 0.2rem;
+  padding: 0.1rem 0.15rem;
 }
 .thinking-line {
   margin-bottom: 0.5rem;
@@ -1376,38 +1426,22 @@ function stopGeneration() {
   100% { background-position: -200% 0; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.tool-steps {
-  list-style: none;
-  margin: 0 0 0.65rem;
-  padding: 0;
-  font-size: 12.5px;
-  color: #0f4c45;
+.activity-bar {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.tool-steps li {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  line-height: 1.55;
-}
-.tool-steps li.running {
-  color: #1f7a6d;
-  background: #eef5f2;
-  border-radius: 8px;
-  padding: 4px 10px;
   align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 0.6rem;
+  padding: 7px 10px;
+  border: 1px solid #e1e8e5;
+  border-radius: 8px;
+  background: #f7f9f8;
+  color: #45655d;
+  font-size: 12.5px;
 }
-.running-label {
-  background: linear-gradient(90deg, #1f7a6d 20%, #6fbfae 50%, #1f7a6d 80%);
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: shimmer 1.6s linear infinite;
-  font-weight: 600;
-}
+.activity-label { color: var(--ink); font-weight: 650; white-space: nowrap; }
+.activity-bar small { overflow: hidden; color: #81938e; text-overflow: ellipsis; white-space: nowrap; }
 .mini-spinner {
   display: inline-block;
   width: 10px;
@@ -1416,31 +1450,27 @@ function stopGeneration() {
   border-top-color: #1f7a6d;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
-  margin-right: 6px;
+  margin: 0;
   vertical-align: -1px;
 }
-.step-check {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: #e3f1ec;
-  color: #1f7a6d;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-top: 2px;
-}
-.step-check :deep(.el-icon) { font-size: 10px; }
-.step-name { font-weight: 600; }
-.step-detail { color: #8ba39d; }
-.tool-trace-card { margin: 0 0 0.65rem; padding: 9px 11px; border: 1px solid #dce9e3; border-radius: 10px; background: #f7fbf8; color: #56726a; font-size: 12px; }
-.tool-trace-card > strong { color: #35685c; font-size: 12px; }
-.tool-trace-card ul { display: grid; gap: 5px; margin: 7px 0 0; padding: 0; list-style: none; }
+.tool-trace-card { margin: 0 0 0.7rem; border: 1px solid #e1e8e5; border-radius: 8px; background: #fafcfb; color: #56726a; font-size: 12px; overflow: hidden; }
+.tool-trace-card.issue { border-color: #ebd8bd; background: #fffdf8; }
+.trace-summary { display: flex; align-items: center; width: 100%; gap: 8px; padding: 8px 10px; border: 0; background: transparent; color: #58736b; font: inherit; text-align: left; cursor: pointer; }
+.trace-summary:hover { background: #f3f7f5; }
+.trace-mark { display: inline-grid; width: 16px; height: 16px; flex: 0 0 auto; place-items: center; border-radius: 50%; background: #e1f0ea; color: #187766; font-weight: 750; }
+.trace-mark.issue { background: #fdf0df; color: #b16a1f; }
+.trace-expand { margin-left: auto; color: #7a9089; white-space: nowrap; }
+.tool-trace-card ul { display: grid; gap: 5px; margin: 0; padding: 0 10px 10px 34px; list-style: none; }
 .tool-trace-card li { display: flex; gap: 6px; align-items: baseline; }
 .tool-trace-card li > span { color: #1f7a6d; font-weight: 700; }
 .tool-trace-card li > span.failed { color: #bd5b4e; }
 .tool-trace-card small { color: #7f948e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.procurement-suggestions { margin: 0 0 .7rem; padding: 10px 12px; border: 1px solid #ead9ad; border-radius: 10px; background: #fffcf4; color: #695b3d; font-size: 13px; }
+.procurement-suggestions > p { margin: 4px 0 8px; color: #8a7c5c; font-size: 12px; }
+.procurement-suggestion-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 0; }
+.procurement-suggestion-row small { color: #8a7c5c; }
+.procurement-suggestion-row button { border: 0; border-radius: 6px; padding: 5px 9px; color: #fff; background: #155b4e; cursor: pointer; font: inherit; font-size: 12px; }
+.procurement-suggestion-row button:disabled { background: #a1b7b0; cursor: default; }
 .assistant-text { line-height: 1.75; font-size: 14.5px; }
 .assistant-text :deep(strong) { color: var(--green); font-weight: 750; }
 .external-recipe { display: grid; gap: 4px; margin-top: 10px; padding: 10px 12px; border: 1px solid #dce9e3; border-radius: 10px; background: #f7fbf8; }

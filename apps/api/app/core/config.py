@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_timeout_seconds: int = 30
     # 仅用于对话 Agent 的只读工具循环；正式配餐图不受该值影响。
-    agent_max_steps: int = 4
+    agent_max_steps: int = 8
     kiosk_token_secret: str = "replace-in-real-environment"
 
     @field_validator("database_url", mode="after")
@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     @classmethod
     def clamp_agent_max_steps(cls, value: int) -> int:
         """工具循环保持有限，防止意外配置导致无限查询或不可控成本。"""
-        return max(1, min(value, 6))
+        return max(1, min(value, 8))
 
 
 @lru_cache

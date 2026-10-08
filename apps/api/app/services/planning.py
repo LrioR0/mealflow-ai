@@ -11,6 +11,7 @@ from decimal import Decimal
 from app.schemas.agent import MenuOption, PlanningConstraints
 from app.services.context_loader import DishFeedbackStats, PlanningContext, RecipeContext
 from app.services.planning_rules import procurement_gap, scale_quantity, violates_allergen
+from app.services.pantry import DEFAULT_PANTRY_STAPLE_KEYS
 
 TIME_LIMIT_DEFAULT_MINUTES = 90
 DISHES_PER_OPTION = 3
@@ -19,18 +20,8 @@ FEEDBACK_NEUTRAL = 0.5
 FEEDBACK_FULL_CONFIDENCE_SAMPLE = 5
 
 # 厨房常备料不作为冰箱库存或采购缺口,但仍参与过敏原/忌口判断。
-PANTRY_STAPLE_KEYS = {
-    "scallion",
-    "ginger",
-    "garlic",
-    "dried_chili",
-    "doubanjiang",
-    "soy_sauce",
-    "vinegar",
-    "starch",
-    "oil",
-    "salt",
-}
+# 兼容现有正式配餐调用；新代码应由 pantry.effective_pantry_keys 注入家庭策略。
+PANTRY_STAPLE_KEYS = DEFAULT_PANTRY_STAPLE_KEYS
 
 
 @dataclass(frozen=True)
@@ -240,7 +231,7 @@ def procurement_lines(
 ) -> list[dict]:
     lines: list[dict] = []
     for key in sorted(requirements):
-        if key in PANTRY_STAPLE_KEYS:
+        if key in (context.pantry_keys or PANTRY_STAPLE_KEYS):
             continue
         required = requirements[key]
         available = context.available_for(key)
@@ -288,7 +279,7 @@ def build_option(
             key_names[line.key]
             for recipe in chosen
             for line in recipe.ingredients
-            if line.key in PANTRY_STAPLE_KEYS and line.key in key_names
+            if line.key in (context.pantry_keys or PANTRY_STAPLE_KEYS) and line.key in key_names
         }
     )
     pantry_notes = (

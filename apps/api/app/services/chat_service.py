@@ -16,7 +16,7 @@ from typing import AsyncIterator
 
 from sqlalchemy import select
 
-from app.agent.conversation import run_conversation_agent
+from app.agent.conversation import stream_conversation_agent
 from app.core.config import get_settings
 from app.db.models import AgentChatMessage, AgentChatSession, AgentRun, Ingredient
 from app.db.session import SessionLocal
@@ -1312,15 +1312,15 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
 
     user_text = _message_without_frontend_context(payload.message)
     yield _status("parse_request", "理解需求", "running")
+    # 这里只负责清理前端附带上下文并接收请求；不能把整段 Agent 工具循环
+    # 算在“理解需求”里，否则 UI 会留下一个永远悬在最上方的旋转状态。
+    yield _status("parse_request", "理解需求", "done", "请求已接收，开始判断下一步")
 
     # 首选受控工具循环：模型只可选择只读家庭工具，无法执行库存/餐单等写操作。
     # Provider 不可用或不支持 function calling 时返回 None，继续走下方既有规则分支。
     live_tool_traces = []
-
-    def _capture_tool_trace(trace) -> None:
-        live_tool_traces.append(trace)
-
-    turn = await run_conversation_agent(
+    turn = None
+    async for agent_event in stream_conversation_agent(
         provider=build_llm_provider(settings),
         workspace_id=payload.workspace_id,
         site_id=payload.site_id,
@@ -1329,20 +1329,28 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         user_text=user_text,
         history=_recent_history_messages(session_id, current_user_message_id),
         max_steps=settings.agent_max_steps,
-        on_tool=_capture_tool_trace,
-    )
+    ):
+        if agent_event["type"] == "status":
+            yield _status(agent_event["step"], agent_event["label"], agent_event["state"], agent_event.get("detail", ""))
+        elif agent_event["type"] == "tool":
+            trace = agent_event["trace"]
+            if trace.status == "running":
+                yield _sse("tool_call", trace.model_dump())
+                yield _status(trace.tool_name, trace.input_summary, "running")
+            else:
+                live_tool_traces.append(trace)
+                state = "done" if trace.status == "success" else "error"
+                yield _sse("tool_call", trace.model_dump())
+                yield _status(trace.tool_name, trace.input_summary, state, trace.output_summary)
+        elif agent_event["type"] == "final":
+            turn = agent_event["turn"]
+        elif agent_event["type"] == "fallback":
+            turn = None
+            break
     if turn is not None:
-        yield _status(
-            "parse_request",
-            "理解需求",
-            "done",
-            "由对话 Agent 根据需要选择只读家庭工具",
-        )
-        for trace in live_tool_traces:
-            state = "done" if trace.status == "success" else "error"
-            yield _sse("tool_call", trace.model_dump())
-            yield _status(trace.tool_name, f"读取 {trace.tool_name}", state, trace.output_summary)
         yield _status("compose_reply", "组织回答", "running")
+        if turn.procurement_suggestions:
+            yield _sse("procurement_suggestions", {"items": turn.procurement_suggestions})
         yield _sse("text", {"delta": turn.text})
         yield _status("compose_reply", "组织回答", "done")
         with SessionLocal() as session:
@@ -1365,10 +1373,12 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 "provider": settings.llm_provider,
                 "route": "conversation_agent",
                 "tool_calls": [trace.model_dump() for trace in live_tool_traces],
+                "procurement_suggestions": turn.procurement_suggestions,
             },
         )
         return
 
+    yield _status("route_request", "判断处理方式", "running")
     route = await _route_message(user_text)
     if _fallback_route(user_text) == "kitchen_recipe" or (
         any(term in user_text for term in ("怎么做", "做法"))
@@ -1392,8 +1402,8 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
     # 「不想按照本地库的做法」这类对接上一轮的否定句:不查库,按通用做法重新生成
     library_refusal = route == "kitchen_recipe" and _wants_non_library_recipe(user_text)
     yield _status(
-        "parse_request",
-        "理解需求",
+        "route_request",
+        "判断处理方式",
         "done",
         (
             "不按本地菜谱库,按通用做法生成"

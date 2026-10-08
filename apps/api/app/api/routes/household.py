@@ -12,12 +12,14 @@ from app.db.models import (
     DietaryRestriction,
     Ingredient,
     InventoryItem,
+    HouseholdPantryConfig,
     MemberEvent,
     Recipe,
     RecipeIngredient,
     User,
     WorkspaceMember,
 )
+from app.services.pantry import DEFAULT_PANTRY_STAPLE_KEYS, effective_pantry_keys
 from app.db.session import SessionLocal
 
 router = APIRouter(tags=["household"])
@@ -68,6 +70,20 @@ class HouseholdView(BaseModel):
     workspace_id: str
     members: list[MemberView]
     events: list[MemberEventView]
+
+
+class PantryConfigView(BaseModel):
+    workspace_id: str
+    use_defaults: bool
+    disabled_default_keys: list[str]
+    custom_keys: list[str]
+    effective_keys: list[str]
+
+
+class PantryConfigUpdateRequest(BaseModel):
+    use_defaults: bool = True
+    disabled_default_keys: list[str] = Field(default_factory=list)
+    custom_keys: list[str] = Field(default_factory=list)
 
 
 class EventCreateRequest(BaseModel):
@@ -136,6 +152,33 @@ class RecipeDetailView(BaseModel):
     steps: list[str]
     ingredients: list[RecipeIngredientDetail]
     source_name: str
+
+
+@router.get("/household/pantry/{workspace_id}", response_model=PantryConfigView)
+def get_pantry_config(workspace_id: str) -> PantryConfigView:
+    with SessionLocal() as session:
+        config = session.get(HouseholdPantryConfig, workspace_id)
+        return PantryConfigView(
+            workspace_id=workspace_id,
+            use_defaults=True if config is None else config.use_defaults,
+            disabled_default_keys=[] if config is None else config.disabled_default_keys or [],
+            custom_keys=[] if config is None else config.custom_keys or [],
+            effective_keys=sorted(effective_pantry_keys(session, workspace_id)),
+        )
+
+
+@router.put("/household/pantry/{workspace_id}", response_model=PantryConfigView)
+def update_pantry_config(workspace_id: str, payload: PantryConfigUpdateRequest) -> PantryConfigView:
+    with SessionLocal() as session:
+        config = session.get(HouseholdPantryConfig, workspace_id)
+        if config is None:
+            config = HouseholdPantryConfig(workspace_id=workspace_id)
+            session.add(config)
+        config.use_defaults = payload.use_defaults
+        config.disabled_default_keys = sorted(set(payload.disabled_default_keys) & set(DEFAULT_PANTRY_STAPLE_KEYS))
+        config.custom_keys = sorted({item.strip() for item in payload.custom_keys if item.strip()})
+        session.commit()
+        return PantryConfigView(workspace_id=workspace_id, use_defaults=config.use_defaults, disabled_default_keys=config.disabled_default_keys, custom_keys=config.custom_keys, effective_keys=sorted(effective_pantry_keys(session, workspace_id)))
 
 
 def _default_tags(event_type: str, tags: list[str]) -> list[str]:

@@ -40,6 +40,14 @@ export interface Household {
   events: HouseholdEvent[]
 }
 
+export interface PantryConfig {
+  workspace_id: string
+  use_defaults: boolean
+  disabled_default_keys: string[]
+  custom_keys: string[]
+  effective_keys: string[]
+}
+
 export interface ChatStreamRequest {
   session_id: string | null
   workspace_id?: string
@@ -85,6 +93,14 @@ export function deleteChatSession(sessionId: string): Promise<{ deleted: boolean
 
 export function fetchHousehold(): Promise<Household> {
   return apiRequest('/household')
+}
+
+export function fetchPantryConfig(workspaceId = 'home-workspace'): Promise<PantryConfig> {
+  return apiRequest(`/household/pantry/${workspaceId}`)
+}
+
+export function updatePantryConfig(payload: Pick<PantryConfig, 'use_defaults' | 'disabled_default_keys' | 'custom_keys'>, workspaceId = 'home-workspace'): Promise<PantryConfig> {
+  return apiRequest(`/household/pantry/${workspaceId}`, { method: 'PUT', body: JSON.stringify(payload) })
 }
 
 export function createHouseholdEvent(payload: {
