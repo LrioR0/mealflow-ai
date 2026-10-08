@@ -1,7 +1,7 @@
 # mealflow-ai
 
 #### 介绍
-面向政府机关食堂的运营决策 Agent：根据人数、库存、饮食限制、成本和公共自助终端反馈，编排工具生成可解释的菜单与采购方案；底层保留个人工作区的扩展能力。
+面向家庭厨房的智能配餐 Agent：根据用餐人数、冰箱库存、成员忌口与特殊事件、预算，通过对话编排工具生成可解释的菜单与采购方案；支持确认发布、What-if 重规划与反馈闭环。项目早期以政府机关食堂为背景设计，多租户与政务场景要求保留在 docs/多租户产品设计.md，作为后续演进方向。
 
 V1 的国庆后演示以 Agent 决策为主，管理页面只提供数据与执行能力。核心证据是自然语言约束理解、真实工具编排、三方案取舍、What-if 重规划、人工确认、反馈闭环和模型故障降级。
 
@@ -14,7 +14,7 @@ V1 的国庆后演示以 Agent 决策为主，管理页面只提供数据与执�
 
 #### 开发状态
 
-项目已完成 V1 底层框架：FastAPI/SQLite 后端、LangGraph 状态骨架、云端模型 Provider 边界、确定性规则工具、Vue 3 管理端、Agent 轨迹与三方案页面、What-if 接口和公共 PC Kiosk。当前 Agent API 使用可运行的规则基线；填入模型配置后应将约束解析节点替换为真实千问调用。
+项目已完成 V1 底层框架：FastAPI/SQLite 后端、LangGraph 状态骨架、云端模型 Provider 边界、确定性规则工具、Vue 3 管理端、对话工作台、Agent 轨迹与三方案页面和 What-if 接口。当前 Agent API 使用可运行的规则基线；填入模型配置后应将约束解析节点替换为真实千问调用。
 
 V1 模型策略已冻结：通过 API 调用千问主模型，DeepSeek 作为备用，智谱作为验证后可替换候选；V1 不进行本地模型部署，V2/V3 再逐步完善模型工程化与私有化评估。
 
@@ -55,7 +55,7 @@ npm install
 npm run dev
 ```
 
-入口：管理员 Agent `http://localhost:5173/admin/agent`，公共终端 `http://localhost:5173/kiosk`，API 文档 `http://localhost:8000/docs`。
+入口：对话工作台 `http://localhost:5173/admin/agent`，API 文档 `http://localhost:8000/docs`。
 
 验证命令：
 

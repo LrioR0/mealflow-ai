@@ -355,6 +355,10 @@ function strategySummary(strategy: string): string {
   return summaries[strategy] ?? '按当前家庭条件综合安排'
 }
 
+// 安全约定：此处用 v-html 渲染 AI 回复，前提是 renderMarkdown 必须
+// 先做 HTML 实体转义（& < >），再只注入 <strong>/<br/> 这类受控标签。
+// 禁止把未转义文本、第三方抓取内容（如下厨房标题）或引入的 markdown
+// 库的原始 HTML 直接喂给 v-html；改动渲染逻辑前先想清楚这条底线。
 function renderMarkdown(text: string): string {
   const escaped = polishClarification(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   return escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br/>')

@@ -7,11 +7,19 @@ services:
       - mealflow-data:/app/data/local
     ports:
       - "8000:8000"
+    healthcheck:
+      # slim 镜像无 curl，用标准库直接打健康端点
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   web:
     build: ./apps/web
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "5173:80"
 

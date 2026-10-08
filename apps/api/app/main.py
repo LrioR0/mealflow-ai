@@ -10,9 +10,11 @@ app = FastAPI(title=settings.app_name, version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # 当前无 cookie/token 鉴权，不开凭据；方法与头按实际用到的收窄，
+    # 将来引入真鉴权时再按需打开。
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Content-Type"],
 )
 app.include_router(api_router, prefix=settings.api_v1_prefix)
 
