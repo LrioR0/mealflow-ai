@@ -1771,10 +1771,13 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             if is_dish_query:
                 # 菜名意图且本地库未收录 → 实时搜索下厨房这道菜;
                 # 搜索失败/无结果时落到下方食材相似与 LLM 通用做法兜底
+                # search_with_briefs 内部是同步 httpx.get + time.sleep 限速，
+                # 直接在 async 流里调用会阻塞事件循环，卡住所有并发 SSE；
+                # 必须丢进线程池执行。
                 from app.services.web_recipe_search import search_with_briefs
 
                 yield _status("web_search", "实时搜索网络菜谱", "running")
-                web_items = search_with_briefs(dish_name, limit=3)
+                web_items = await asyncio.to_thread(search_with_briefs, dish_name, 3)
                 yield _status(
                     "web_search",
                     "实时搜索网络菜谱",

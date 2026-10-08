@@ -27,6 +27,7 @@ _REQUEST_INTERVAL = 0.8  # 对站点的最小请求间隔,避免触发限流
 _last_request_at = 0.0
 # 同关键词的搜索结果内存缓存(TTL 10 分钟):重复询问不重复抓取
 _CACHE_TTL = 600.0
+_CACHE_MAX_ENTRIES = 200  # 缓存条数上限：超出后先淘汰最早写入的关键词，防止无限增长
 _search_cache: dict[str, tuple[float, list[dict]]] = {}
 
 
@@ -95,6 +96,9 @@ def search_xiachufang(keyword: str, limit: int = 3) -> list[dict]:
         )
         if len(items) >= limit:
             break
+    if len(_search_cache) >= _CACHE_MAX_ENTRIES:
+        oldest = min(_search_cache, key=lambda key: _search_cache[key][0])
+        _search_cache.pop(oldest, None)
     _search_cache[term] = (time.monotonic(), items)
     return items
 
