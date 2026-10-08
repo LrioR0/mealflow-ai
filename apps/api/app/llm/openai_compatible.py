@@ -70,6 +70,8 @@ class OpenAICompatibleCloudProvider(LLMProvider):
             messages=messages,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
             tool_choice="auto",
+            # 对话 Agent 每轮只观察一次工具结果，避免模型并行发起一串无依赖查询。
+            parallel_tool_calls=False,
             temperature=0.1,
         )
         message = response.choices[0].message

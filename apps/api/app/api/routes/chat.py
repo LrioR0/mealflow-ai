@@ -29,7 +29,7 @@ async def stream_chat(payload: ChatStreamRequest) -> StreamingResponse:
 @router.post("")
 async def chat_once(payload: ChatStreamRequest) -> dict:
     """非流式兼容:聚合同一条事件流,返回最终回复(测试与降级用)。"""
-    result: dict = {"session_id": None, "text": "", "plan": None, "questions": [], "needs_input": False}
+    result: dict = {"session_id": None, "text": "", "plan": None, "questions": [], "tool_calls": [], "needs_input": False}
     buffer = ""
     async for chunk in chat_service.stream_chat(payload):
         buffer += chunk
@@ -54,6 +54,8 @@ async def chat_once(payload: ChatStreamRequest) -> dict:
             elif event_name == "questions":
                 result["questions"] = data.get("items", [])
                 result["needs_input"] = data.get("needs_input", False)
+            elif event_name == "tool_call":
+                result["tool_calls"].append(data)
             elif event_name == "error":
                 result["error"] = data.get("message")
     return result

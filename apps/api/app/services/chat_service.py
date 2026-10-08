@@ -16,6 +16,7 @@ from typing import AsyncIterator
 
 from sqlalchemy import select
 
+from app.agent.conversation import run_conversation_agent
 from app.core.config import get_settings
 from app.db.models import AgentChatMessage, AgentChatSession, AgentRun, Ingredient
 from app.db.session import SessionLocal
@@ -1311,6 +1312,63 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
 
     user_text = _message_without_frontend_context(payload.message)
     yield _status("parse_request", "理解需求", "running")
+
+    # 首选受控工具循环：模型只可选择只读家庭工具，无法执行库存/餐单等写操作。
+    # Provider 不可用或不支持 function calling 时返回 None，继续走下方既有规则分支。
+    live_tool_traces = []
+
+    def _capture_tool_trace(trace) -> None:
+        live_tool_traces.append(trace)
+
+    turn = await run_conversation_agent(
+        provider=build_llm_provider(settings),
+        workspace_id=payload.workspace_id,
+        site_id=payload.site_id,
+        meal_service_id=payload.meal_service_id,
+        diner_ids=payload.diners_user_ids,
+        user_text=user_text,
+        history=_recent_history_messages(session_id, current_user_message_id),
+        max_steps=settings.agent_max_steps,
+        on_tool=_capture_tool_trace,
+    )
+    if turn is not None:
+        yield _status(
+            "parse_request",
+            "理解需求",
+            "done",
+            "由对话 Agent 根据需要选择只读家庭工具",
+        )
+        for trace in live_tool_traces:
+            state = "done" if trace.status == "success" else "error"
+            yield _sse("tool_call", trace.model_dump())
+            yield _status(trace.tool_name, f"读取 {trace.tool_name}", state, trace.output_summary)
+        yield _status("compose_reply", "组织回答", "running")
+        yield _sse("text", {"delta": turn.text})
+        yield _status("compose_reply", "组织回答", "done")
+        with SessionLocal() as session:
+            message = AgentChatMessage(
+                session_id=session_id,
+                role="assistant",
+                content=turn.text,
+                thinking_text=None,
+                run_id=None,
+            )
+            session.add(message)
+            session.commit()
+            message_id = message.id
+        yield _sse(
+            "done",
+            {
+                "session_id": session_id,
+                "message_id": message_id,
+                "needs_input": False,
+                "provider": settings.llm_provider,
+                "route": "conversation_agent",
+                "tool_calls": [trace.model_dump() for trace in live_tool_traces],
+            },
+        )
+        return
+
     route = await _route_message(user_text)
     if _fallback_route(user_text) == "kitchen_recipe" or (
         any(term in user_text for term in ("怎么做", "做法"))

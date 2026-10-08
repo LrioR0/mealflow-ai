@@ -57,6 +57,15 @@ interface WebRecipeItem {
   steps_brief: string[]
 }
 
+interface ToolCallTrace {
+  tool_name: string
+  status: 'success' | 'error' | string
+  duration_ms: number
+  input_summary: string
+  output_summary: string
+  error_code?: string | null
+}
+
 interface ChatBubble {
   id: string
   role: 'user' | 'assistant'
@@ -75,6 +84,7 @@ interface ChatBubble {
   candidatesQuery?: string
   webQuery?: string
   webRecipes?: WebRecipeItem[]
+  toolCalls?: ToolCallTrace[]
   thinkingOpen?: boolean
 }
 
@@ -84,6 +94,9 @@ const STEP_LABELS: Record<string, string> = {
   get_meal_service_context: '确认餐次',
   list_inventory: '读取冰箱',
   get_member_constraints: '检查用餐限制',
+  get_inventory_summary: '读取冰箱库存',
+  get_preference_summary: '读取家庭偏好',
+  search_recipes: '检索本地菜谱',
   search_recipe_candidates: '召回菜谱',
   filter_hard_constraints: '过滤硬约束',
   score_menu_options: '方案评分',
@@ -563,6 +576,9 @@ async function send(preset?: string) {
       } else if (event.event === 'text') {
         assistant.content += String(event.data.delta ?? '')
         assistant.thinkingDone = true
+      } else if (event.event === 'tool_call') {
+        assistant.toolCalls ??= []
+        assistant.toolCalls.push(event.data as unknown as ToolCallTrace)
       } else if (event.event === 'plan') {
         assistant.thinkingDone = true
         assistant.plan = event.data as unknown as AgentRun
@@ -726,6 +742,17 @@ function stopGeneration() {
                   </template>
                 </li>
               </ol>
+
+              <div v-if="!bubble.streaming && bubble.toolCalls?.length" class="tool-trace-card">
+                <strong>本轮已读取</strong>
+                <ul>
+                  <li v-for="(trace, index) in bubble.toolCalls" :key="`${trace.tool_name}-${index}`">
+                    <span :class="{ failed: trace.status !== 'success' }">{{ trace.status === 'success' ? '✓' : '!' }}</span>
+                    <b>{{ stepLabel({ step: trace.tool_name, state: 'done', detail: '' }) }}</b>
+                    <small>{{ trace.output_summary }}</small>
+                  </li>
+                </ul>
+              </div>
 
               <div
                 v-if="bubble.streaming && !bubble.content && !bubble.error && (bubble.thinkingDone || allStepsDone(bubble))"
@@ -1407,6 +1434,13 @@ function stopGeneration() {
 .step-check :deep(.el-icon) { font-size: 10px; }
 .step-name { font-weight: 600; }
 .step-detail { color: #8ba39d; }
+.tool-trace-card { margin: 0 0 0.65rem; padding: 9px 11px; border: 1px solid #dce9e3; border-radius: 10px; background: #f7fbf8; color: #56726a; font-size: 12px; }
+.tool-trace-card > strong { color: #35685c; font-size: 12px; }
+.tool-trace-card ul { display: grid; gap: 5px; margin: 7px 0 0; padding: 0; list-style: none; }
+.tool-trace-card li { display: flex; gap: 6px; align-items: baseline; }
+.tool-trace-card li > span { color: #1f7a6d; font-weight: 700; }
+.tool-trace-card li > span.failed { color: #bd5b4e; }
+.tool-trace-card small { color: #7f948e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assistant-text { line-height: 1.75; font-size: 14.5px; }
 .assistant-text :deep(strong) { color: var(--green); font-weight: 750; }
 .external-recipe { display: grid; gap: 4px; margin-top: 10px; padding: 10px 12px; border: 1px solid #dce9e3; border-radius: 10px; background: #f7fbf8; }
