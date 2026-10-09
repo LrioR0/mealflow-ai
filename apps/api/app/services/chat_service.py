@@ -1351,6 +1351,8 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         yield _status("compose_reply", "组织回答", "running")
         if turn.procurement_suggestions:
             yield _sse("procurement_suggestions", {"items": turn.procurement_suggestions})
+        if turn.menu_recommendation:
+            yield _sse("menu_recommendation", turn.menu_recommendation)
         yield _sse("text", {"delta": turn.text})
         yield _status("compose_reply", "组织回答", "done")
         with SessionLocal() as session:
@@ -1374,6 +1376,8 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 "route": "conversation_agent",
                 "tool_calls": [trace.model_dump() for trace in live_tool_traces],
                 "procurement_suggestions": turn.procurement_suggestions,
+                "menu_recommendation": turn.menu_recommendation,
+                "tool_budget": {"used": len([trace for trace in live_tool_traces if trace.duration_ms > 0]), "limit": settings.agent_max_steps},
             },
         )
         return

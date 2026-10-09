@@ -88,7 +88,7 @@ async def test_agent_executes_readonly_tool_then_uses_result(monkeypatch) -> Non
 
 @pytest.mark.asyncio
 async def test_agent_caps_tool_loop(monkeypatch) -> None:
-    tool_response = {
+    inventory_response = {
         "role": "assistant",
         "tool_calls": [
             {
@@ -98,7 +98,17 @@ async def test_agent_caps_tool_loop(monkeypatch) -> None:
             }
         ],
     }
-    provider = _ScriptedProvider([tool_response, tool_response, tool_response])
+    preference_response = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": "call-2",
+                "type": "function",
+                "function": {"name": "get_preference_summary", "arguments": "{}"},
+            }
+        ],
+    }
+    provider = _ScriptedProvider([inventory_response, preference_response])
     monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: _context())
 
     turn = await run_conversation_agent(
@@ -143,3 +153,32 @@ async def test_pantry_staple_is_not_procurement_suggestion(monkeypatch) -> None:
     assert turn is not None
     assert turn.procurement_suggestions == []
     assert turn.traces[0].status == "success"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tool_calls_reuse_result_without_spending_budget(monkeypatch) -> None:
+    call = {"id": "call", "type": "function", "function": {"name": "search_recipes", "arguments": '{"query":"番茄"}'}}
+    provider = _ScriptedProvider([
+        {"role": "assistant", "tool_calls": [call, {**call, "id": "call-2"}, {**call, "id": "call-3"}]},
+        {"role": "assistant", "content": "番茄炒蛋可以做。"},
+    ])
+    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: _context())
+    turn = await run_conversation_agent(provider=provider, workspace_id="workspace", site_id="kitchen", meal_service_id="lunch", diner_ids=None, user_text="查番茄菜", history=[], max_steps=6)
+    assert turn is not None
+    assert len(turn.traces) == 3
+    assert sum(trace.duration_ms > 0 for trace in turn.traces) == 1
+    assert sum("已复用本轮结果" in trace.output_summary for trace in turn.traces) == 2
+
+
+@pytest.mark.asyncio
+async def test_recommend_menu_returns_structured_menu(monkeypatch) -> None:
+    provider = _ScriptedProvider([
+        {"role": "assistant", "tool_calls": [{"id": "menu", "type": "function", "function": {"name": "recommend_menu", "arguments": '{"dish_count":2,"staple":"米饭"}'}}]},
+        {"role": "assistant", "content": "已为你整理菜单。"},
+    ])
+    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: _context())
+    turn = await run_conversation_agent(provider=provider, workspace_id="workspace", site_id="kitchen", meal_service_id="lunch", diner_ids=None, user_text="两人两道菜配米饭", history=[], max_steps=6)
+    assert turn is not None
+    assert turn.menu_recommendation is not None
+    assert turn.menu_recommendation["staple"] == "米饭"
+    assert turn.menu_recommendation["items"][0]["name"] == "番茄炒蛋"

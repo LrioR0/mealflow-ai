@@ -77,6 +77,17 @@ interface ProcurementSuggestion {
   added?: boolean
 }
 
+interface MenuRecommendation {
+  dish_count: number
+  staple: string
+  items: Array<{ recipe_id: string; name: string; duration_minutes: number; state: 'ready' | 'purchase_optional' | 'restricted'; used_inventory: string[]; pantry_staples: string[]; missing_main_ingredients: string[]; restricted_ingredients: string[] }>
+  ready_count: number
+  purchase_optional_count: number
+  restricted_count: number
+  estimated_parallel_minutes: number
+  reason: string
+}
+
 interface ChatBubble {
   id: string
   role: 'user' | 'assistant'
@@ -98,6 +109,8 @@ interface ChatBubble {
   toolCalls?: ToolCallTrace[]
   toolTraceOpen?: boolean
   procurementSuggestions?: ProcurementSuggestion[]
+  menuRecommendation?: MenuRecommendation
+  toolBudget?: { used: number; limit: number }
   thinkingOpen?: boolean
 }
 
@@ -112,6 +125,7 @@ const STEP_LABELS: Record<string, string> = {
   search_recipes: '检索本地菜谱',
   get_recipe_detail: '读取菜谱做法',
   check_recipe_availability: '核对食材可用性',
+  recommend_menu: '生成本餐建议',
   agent_decide: '判断下一步',
   route_request: '判断处理方式',
   search_recipe_candidates: '召回菜谱',
@@ -448,7 +462,8 @@ function traceSummary(bubble: ChatBubble): string {
   const successful = [...new Set(traces.filter((trace) => trace.status === 'success').map((trace) => stepLabel({ step: trace.tool_name, state: 'done', detail: '' })))]
   const failed = traces.filter((trace) => trace.status === 'error').length
   const base = successful.length ? `已读取 ${successful.join('、')}` : '本轮未读取额外信息'
-  return failed ? `${base} · ${failed} 项未完成` : base
+  const budget = bubble.toolBudget ? ` · 已用 ${bubble.toolBudget.used} / ${bubble.toolBudget.limit} 次` : ''
+  return failed ? `${base} · ${failed} 项未完成${budget}` : `${base}${budget}`
 }
 
 function traceHasIssue(bubble: ChatBubble): boolean {
@@ -614,6 +629,8 @@ async function send(preset?: string) {
         else assistant.toolCalls.push(trace)
       } else if (event.event === 'procurement_suggestions') {
         assistant.procurementSuggestions = (event.data.items as ProcurementSuggestion[]) ?? []
+      } else if (event.event === 'menu_recommendation') {
+        assistant.menuRecommendation = event.data as unknown as MenuRecommendation
       } else if (event.event === 'plan') {
         assistant.thinkingDone = true
         assistant.plan = event.data as unknown as AgentRun
@@ -640,6 +657,7 @@ async function send(preset?: string) {
         sessionId.value = (event.data.session_id as string) ?? sessionId.value
         if (sessionId.value) sessionStorage.setItem(CHAT_SESSION_KEY, sessionId.value)
         assistant.searchQuery = typeof event.data.search_query === 'string' ? event.data.search_query : undefined
+        assistant.toolBudget = event.data.tool_budget as { used: number; limit: number } | undefined
       }
       scrollBottom()
     }
@@ -793,6 +811,23 @@ function stopGeneration() {
                   </li>
                 </ul>
               </div>
+
+              <section v-if="bubble.menuRecommendation" class="menu-recommendation-card">
+                <header>
+                  <div><span>本餐建议</span><strong>{{ bubble.menuRecommendation.ready_count }} 道可直接做</strong></div>
+                  <small>约 {{ bubble.menuRecommendation.estimated_parallel_minutes }} 分钟</small>
+                </header>
+                <p>{{ bubble.menuRecommendation.reason }}<template v-if="bubble.menuRecommendation.staple"> · 主食：{{ bubble.menuRecommendation.staple }}</template></p>
+                <div class="menu-recommendation-items">
+                  <article v-for="item in bubble.menuRecommendation.items" :key="item.recipe_id" :class="item.state">
+                    <strong>{{ item.name }}</strong>
+                    <small v-if="item.state === 'ready'">可直接做</small>
+                    <small v-else-if="item.state === 'purchase_optional'">缺：{{ item.missing_main_ingredients.join('、') }}</small>
+                    <small v-else>限制：{{ item.restricted_ingredients.join('、') }}</small>
+                    <em v-if="item.used_inventory.length">用库存：{{ item.used_inventory.join('、') }}</em>
+                  </article>
+                </div>
+              </section>
 
               <div v-if="bubble.procurementSuggestions?.length" class="procurement-suggestions">
                 <strong>缺少的主料（可选）</strong>
@@ -1465,6 +1500,22 @@ function stopGeneration() {
 .tool-trace-card li > span { color: #1f7a6d; font-weight: 700; }
 .tool-trace-card li > span.failed { color: #bd5b4e; }
 .tool-trace-card small { color: #7f948e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-recommendation-card { margin: 0 0 .7rem; padding: 12px; border: 1px solid #cfe2da; border-radius: 10px; background: #fbfdfc; }
+.menu-recommendation-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.menu-recommendation-card header div { display: flex; align-items: baseline; gap: 8px; }
+.menu-recommendation-card header span { color: #56726a; font-size: 12px; }
+.menu-recommendation-card header strong { color: var(--green); font-size: 15px; }
+.menu-recommendation-card header small, .menu-recommendation-card > p { color: var(--muted); font-size: 12px; }
+.menu-recommendation-card > p { margin: 5px 0 9px; }
+.menu-recommendation-items { display: grid; gap: 6px; }
+.menu-recommendation-items article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 9px; padding: 7px 8px; border-radius: 7px; background: #f4f8f6; }
+.menu-recommendation-items article.purchase_optional { background: #fffaf0; }
+.menu-recommendation-items article.restricted { background: #fff4f2; }
+.menu-recommendation-items strong { color: var(--ink); font-size: 13px; }
+.menu-recommendation-items small { color: #69817a; font-size: 11.5px; }
+.menu-recommendation-items article.purchase_optional small { color: #a16c24; }
+.menu-recommendation-items article.restricted small { color: #b4534b; }
+.menu-recommendation-items em { grid-column: 1 / -1; color: #85958f; font-size: 11.5px; font-style: normal; }
 .procurement-suggestions { margin: 0 0 .7rem; padding: 10px 12px; border: 1px solid #ead9ad; border-radius: 10px; background: #fffcf4; color: #695b3d; font-size: 13px; }
 .procurement-suggestions > p { margin: 4px 0 8px; color: #8a7c5c; font-size: 12px; }
 .procurement-suggestion-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 0; }

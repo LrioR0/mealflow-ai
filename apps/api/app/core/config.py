@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_timeout_seconds: int = 30
     # 仅用于对话 Agent 的只读工具循环；正式配餐图不受该值影响。
-    agent_max_steps: int = 8
+    agent_max_steps: int = 6
     kiosk_token_secret: str = "replace-in-real-environment"
 
     @field_validator("database_url", mode="after")
