@@ -55,7 +55,24 @@ export interface ChatStreamRequest {
   site_id?: string
   meal_service_id?: string
   diners_user_ids?: string[]
+  model_id?: string
   message: string
+}
+
+export interface ChatModel {
+  id: string
+  label: string
+  provider: string
+  enabled: boolean
+  default: boolean
+  is_free: boolean
+  supports_tools: boolean
+  supports_stream: boolean
+  reason: string | null
+}
+
+export function fetchChatModels(): Promise<ChatModel[]> {
+  return apiRequest('/agent/chat/models')
 }
 
 export interface ChatPlanEvent extends AgentRun {}

@@ -18,10 +18,12 @@ import {
   fetchChatSession,
   fetchChatSessionCount,
   fetchChatSessions,
+  fetchChatModels,
   fetchHousehold,
   fetchRecipeDetail,
   streamChat,
   type ChatSessionSummary,
+  type ChatModel,
   type Household,
   type RecipeDetail,
 } from '../../api/chat'
@@ -79,10 +81,44 @@ interface ProcurementSuggestion {
   added?: boolean
 }
 
+interface MenuIngredient {
+  name: string
+  display: string
+}
+
+interface MenuItem {
+  recipe_id: string
+  name: string
+  role?: string
+  role_label?: string
+  target_servings?: number
+  duration_minutes: number
+  state: 'ready' | 'purchase_optional' | 'restricted'
+  scaled_ingredients?: MenuIngredient[]
+  used_inventory: string[]
+  pantry_staples: string[]
+  missing_main_ingredients: string[]
+  restricted_ingredients: string[]
+}
+
+interface MenuStaple {
+  type: string
+  name: string
+  suggested_quantity?: string
+  cooked_quantity?: string
+  recipe_id?: string
+  scaled_ingredients?: MenuIngredient[]
+}
+
 interface MenuRecommendation {
+  diners?: number
   dish_count: number
-  staple: string
-  items: Array<{ recipe_id: string; name: string; duration_minutes: number; state: 'ready' | 'purchase_optional' | 'restricted'; used_inventory: string[]; pantry_staples: string[]; missing_main_ingredients: string[]; restricted_ingredients: string[] }>
+  meal_structure?: string
+  staple: MenuStaple | string | null
+  items: MenuItem[]
+  balance_summary?: string
+  portion_note?: string
+  relaxations?: string[]
   ready_count: number
   purchase_optional_count: number
   restricted_count: number
@@ -93,6 +129,8 @@ interface MenuRecommendation {
 interface ChatBubble {
   id: string
   role: 'user' | 'assistant'
+  modelId?: string
+  modelSwitchLabel?: string
   content: string
   thinking: string
   thinkingDone: boolean
@@ -128,7 +166,7 @@ const STEP_LABELS: Record<string, string> = {
   get_recipe_detail: '读取菜谱做法',
   check_recipe_availability: '核对食材可用性',
   recommend_menu: '生成本餐建议',
-  agent_decide: '判断下一步',
+  agent_decide: '分析需求',
   route_request: '判断处理方式',
   search_recipe_candidates: '召回菜谱',
   filter_hard_constraints: '过滤硬约束',
@@ -162,11 +200,54 @@ const expandedDish = ref<string | null>(null)
 const household = ref<Household | null>(null)
 const selectedDinerIds = ref<string[]>([])
 const dinerPickerOpen = ref(false)
-const dinerSelectorEl = ref<HTMLElement | null>(null)
 const knownMemberIds = new Set<string>()
 const CHAT_SCROLL_KEY = 'mealflow_agent_chat_scroll_top_v1'
 const CHAT_SESSION_KEY = 'mealflow_agent_chat_session_id_v1'
+const CHAT_MODEL_KEY = 'mealflow_agent_model_id_v1'
 const savedChatScrollTop = ref(0)
+const chatModels = ref<ChatModel[]>([])
+const selectedModelId = ref('')
+const modelMenuOpen = ref(false)
+
+const selectedModel = computed(() => chatModels.value.find((item) => item.id === selectedModelId.value) ?? null)
+
+async function loadChatModels() {
+  try {
+    const models = await fetchChatModels()
+    chatModels.value = models
+    const saved = localStorage.getItem(CHAT_MODEL_KEY)
+    const preferred = models.find((item) => item.id === saved && item.enabled)
+    const fallback = models.find((item) => item.default && item.enabled) ?? models.find((item) => item.enabled)
+    selectedModelId.value = preferred?.id ?? fallback?.id ?? ''
+  } catch {
+    chatModels.value = []
+    selectedModelId.value = ''
+  }
+}
+
+function chooseModel(model: ChatModel) {
+  if (!model.enabled || sending.value) return
+  selectedModelId.value = model.id
+  localStorage.setItem(CHAT_MODEL_KEY, model.id)
+  modelMenuOpen.value = false
+}
+
+function modelMonogram(model: ChatModel): string {
+  return '✦'
+}
+
+function modelHint(model: ChatModel): string {
+  if (!model.enabled) return '尚未配置连接'
+  if (model.is_free) return '官方免费模型 · 支持 Agent 工具调用'
+  if (model.provider === 'aitechflux') return 'AITechFlux · 对话与工具调用'
+  return '家庭厨房 · 日常推荐'
+}
+
+function dinerTriggerLabel(): string {
+  return selectedDiners.value.length
+    ? selectedDiners.value.map((member) => member.display_name).join('、')
+    : '选择用餐人员'
+}
 
 // ===== 会话管理:紧凑工具栏 + 历史抽屉 + 刷新恢复 =====
 const historyDrawerOpen = ref(false)
@@ -344,7 +425,7 @@ async function restoreSession(id: string) {
       reactive({
         id: message.id,
         role: message.role === 'user' ? ('user' as const) : ('assistant' as const),
-        content: message.content,
+        content: message.role === 'assistant' ? publicAssistantText(message.content) : message.content,
         thinking: message.thinking_text ?? '',
         thinkingDone: true,
         thinkingOpen: false,
@@ -370,12 +451,6 @@ async function restoreSession(id: string) {
 
 const selectedDiners = computed(() =>
   (household.value?.members ?? []).filter((member) => selectedDinerIds.value.includes(member.user_id)),
-)
-
-const dinerSummary = computed(() =>
-  selectedDiners.value.length
-    ? selectedDiners.value.map((member) => member.display_name).join('、')
-    : '还未选择用餐人',
 )
 
 async function loadHousehold() {
@@ -423,6 +498,7 @@ onActivated(() => {
   }
   void loadHousehold()
   void loadSessions()
+  void loadChatModels()
   // 刷新后组件重建:从 sessionStorage 恢复当前会话(KeepAlive 内切换页面则 ref 还在,跳过)
   if (!sessionId.value && !messages.value.length) {
     const saved = sessionStorage.getItem(CHAT_SESSION_KEY)
@@ -437,17 +513,7 @@ const followLatest = ref(true)
 onBeforeUnmount(() => {
   rememberChatScroll()
   if (scrollFrame !== null) cancelAnimationFrame(scrollFrame)
-  document.removeEventListener('pointerdown', onDocumentPointerDown)
 })
-
-function onDocumentPointerDown(event: PointerEvent) {
-  const target = event.target as Node | null
-  if (dinerPickerOpen.value && target && !dinerSelectorEl.value?.contains(target)) {
-    dinerPickerOpen.value = false
-  }
-}
-
-document.addEventListener('pointerdown', onDocumentPointerDown)
 
 function onListScroll() {
   const list = listEl.value
@@ -483,9 +549,40 @@ function strategySummary(strategy: string): string {
 // 先做 HTML 实体转义（& < >），再只注入 <strong>/<br/> 这类受控标签。
 // 禁止把未转义文本、第三方抓取内容（如下厨房标题）或引入的 markdown
 // 库的原始 HTML 直接喂给 v-html；改动渲染逻辑前先想清楚这条底线。
+const PROTOCOL_LEAK = /<\|DSML\||<\uFF5CDSML\uFF5C|invoke\s+name\s*=|tool_calls/i
+
+function publicAssistantText(text: string): string {
+  if (!text || PROTOCOL_LEAK.test(text)) return ''
+  return text
+}
+
 function renderMarkdown(text: string): string {
-  const escaped = polishClarification(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const safe = publicAssistantText(text)
+  if (!safe) return ''
+  const escaped = polishClarification(safe).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   return escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br/>')
+}
+
+function stapleOf(menu: MenuRecommendation): MenuStaple | null {
+  if (!menu.staple) return null
+  if (typeof menu.staple === 'string') return { type: menu.staple, name: menu.staple }
+  return menu.staple
+}
+
+function menuSections(menu: MenuRecommendation): Array<{ label: string; items: MenuItem[] }> {
+  const order = ['荤菜', '荤素', '素菜', '汤', '菜品']
+  const groups = new Map<string, MenuItem[]>(order.map((label) => [label, []]))
+  for (const item of menu.items) {
+    const label = item.role_label && groups.has(item.role_label) ? item.role_label : '菜品'
+    groups.get(label)?.push(item)
+  }
+  return order
+    .filter((label) => (groups.get(label) || []).length)
+    .map((label) => ({ label, items: groups.get(label) || [] }))
+}
+
+function ingredientLine(item: { scaled_ingredients?: MenuIngredient[] }): string {
+  return (item.scaled_ingredients || []).map((row) => `${row.name} ${row.display}`).join('、')
 }
 
 function money(cents: number | null | undefined): string {
@@ -534,6 +631,7 @@ function polishClarification(text: string): string {
 }
 
 function activeStep(bubble: ChatBubble): StatusStep | undefined {
+  if (bubble.content) return undefined
   return [...bubble.steps].reverse().find((step) => step.state === 'running')
 }
 
@@ -630,6 +728,11 @@ async function send(preset?: string) {
   followLatest.value = true
   sending.value = true
   input.value = ''
+  const modelId = selectedModelId.value || undefined
+  const previousModelId = [...messages.value].reverse().find((message) => message.modelId)?.modelId
+  const modelSwitchLabel = previousModelId && modelId && previousModelId !== modelId
+    ? selectedModel.value?.label
+    : undefined
   messages.value.push({
     id: seq(),
     role: 'user',
@@ -647,6 +750,8 @@ async function send(preset?: string) {
   const assistant = reactive<ChatBubble>({
     id: seq(),
     role: 'assistant',
+    modelId,
+    modelSwitchLabel,
     content: '',
     thinking: '',
     thinkingDone: false,
@@ -669,6 +774,7 @@ async function send(preset?: string) {
     for await (const event of streamChat({
       session_id: sessionId.value,
       diners_user_ids: selectedDinerIds.value,
+      model_id: modelId,
       message: requestMessage,
     }, controller.signal)) {
       if (event.event === 'thinking') {
@@ -698,8 +804,11 @@ async function send(preset?: string) {
             assistant.steps.push({ step, label, state, detail })
           }
         }
+      } else if (event.event === 'text_reset') {
+        assistant.content = ''
       } else if (event.event === 'text') {
         assistant.content += String(event.data.delta ?? '')
+        if (PROTOCOL_LEAK.test(assistant.content)) assistant.content = ''
         assistant.thinkingDone = true
       } else if (event.event === 'tool_call') {
         assistant.toolCalls ??= []
@@ -834,7 +943,11 @@ function stopGeneration() {
           </div>
 
           <!-- Agent 消息:思考直播 → 步骤 → 回答 → 方案卡 → 反问 -->
-          <div v-else class="msg-row assistant">
+          <div v-if="bubble.modelSwitchLabel" class="model-switch-note" role="status">
+            <span class="model-switch-icon" aria-hidden="true">⇄</span>
+            <span>模型已切换至 <strong>{{ bubble.modelSwitchLabel }}</strong></span>
+          </div>
+          <div v-if="bubble.role === 'assistant'" class="msg-row assistant">
             <div class="assistant-block">
               <div
                 v-if="bubble.streaming && !bubble.thinking && !bubble.steps.length"
@@ -843,7 +956,6 @@ function stopGeneration() {
                 <span class="spinner"></span>
               </div>
 
-              <!-- 思考过程:LLM 为真实思维链,规则分支为真实执行步骤;流式自动展开,完成收起(菜单列表保持展开) -->
               <div v-if="bubble.thinking" class="thinking-box">
                 <button class="thinking-toggle" type="button" @click="bubble.thinkingOpen = !bubble.thinkingOpen">
                   <span>{{ bubble.streaming && !bubble.thinkingDone ? '✦ 正在思考' : '✦ 思考过程' }}</span>
@@ -853,10 +965,13 @@ function stopGeneration() {
               </div>
 
               <!-- 只突出当前真实动作；历史工具信息在完成后按需展开，避免占满对话。 -->
-              <div v-if="bubble.streaming && activeStep(bubble)" class="activity-bar">
-                <span class="mini-spinner"></span>
-                <span class="activity-label">{{ stepLabel(activeStep(bubble)!) }}</span>
-                <small>{{ activeStep(bubble)?.detail || '正在处理…' }}</small>
+              <div v-if="bubble.streaming && activeStep(bubble)" class="activity-bar" role="status" aria-live="polite" :class="{ decision: activeStep(bubble)?.step === 'agent_decide' }">
+                <span class="activity-orb">✦</span>
+                <div class="activity-copy">
+                  <strong>{{ activeStep(bubble)?.step === 'agent_decide' ? '正在分析需求' : stepLabel(activeStep(bubble)!) }}</strong>
+                  <small>{{ activeStep(bubble)?.detail || (activeStep(bubble)?.step === 'agent_decide' ? '判断下一步行动' : '正在处理…') }}</small>
+                </div>
+                <span class="activity-dots" aria-hidden="true"><i></i><i></i><i></i></span>
               </div>
 
               <div v-if="!bubble.streaming && bubble.toolCalls?.length" class="tool-trace-card" :class="{ issue: traceHasIssue(bubble) }">
@@ -876,19 +991,40 @@ function stopGeneration() {
 
               <section v-if="bubble.menuRecommendation" class="menu-recommendation-card">
                 <header>
-                  <div><span>本餐建议</span><strong>{{ bubble.menuRecommendation.ready_count }} 道可直接做</strong></div>
+                  <div>
+                    <span>本餐建议</span>
+                    <strong>{{ bubble.menuRecommendation.diners ? `${bubble.menuRecommendation.diners} 人` : '' }} {{ bubble.menuRecommendation.meal_structure || `${bubble.menuRecommendation.ready_count} 道可直接做` }}</strong>
+                  </div>
                   <small>约 {{ bubble.menuRecommendation.estimated_parallel_minutes }} 分钟</small>
                 </header>
-                <p>{{ bubble.menuRecommendation.reason }}<template v-if="bubble.menuRecommendation.staple"> · 主食：{{ bubble.menuRecommendation.staple }}</template></p>
-                <div class="menu-recommendation-items">
-                  <article v-for="item in bubble.menuRecommendation.items" :key="item.recipe_id" :class="item.state">
-                    <strong>{{ item.name }}</strong>
-                    <small v-if="item.state === 'ready'">可直接做</small>
-                    <small v-else-if="item.state === 'purchase_optional'">缺：{{ item.missing_main_ingredients.join('、') }}</small>
-                    <small v-else>限制：{{ item.restricted_ingredients.join('、') }}</small>
-                    <em v-if="item.used_inventory.length">用库存：{{ item.used_inventory.join('、') }}</em>
-                  </article>
+                <p>{{ bubble.menuRecommendation.balance_summary || bubble.menuRecommendation.reason }}</p>
+                <p v-for="note in bubble.menuRecommendation.relaxations || []" :key="note" class="menu-relaxation">{{ note }}</p>
+                <div v-for="group in menuSections(bubble.menuRecommendation)" :key="group.label" class="menu-group">
+                  <h4>{{ group.label }}</h4>
+                  <div class="menu-recommendation-items">
+                    <article v-for="item in group.items" :key="item.recipe_id" :class="item.state">
+                      <strong>{{ item.name }}</strong>
+                      <small v-if="item.target_servings">{{ item.target_servings }} 人份</small>
+                      <small v-if="item.state === 'ready'">可直接做</small>
+                      <small v-else-if="item.state === 'purchase_optional'">可选采购：{{ item.missing_main_ingredients.join('、') }}</small>
+                      <small v-else>限制：{{ item.restricted_ingredients.join('、') }}</small>
+                      <em v-if="ingredientLine(item)">用量：{{ ingredientLine(item) }}</em>
+                      <em v-if="item.used_inventory.length">用库存：{{ item.used_inventory.join('、') }}</em>
+                    </article>
+                  </div>
                 </div>
+                <div v-if="stapleOf(bubble.menuRecommendation)" class="menu-group">
+                  <h4>主食</h4>
+                  <div class="menu-recommendation-items">
+                    <article>
+                      <strong>{{ stapleOf(bubble.menuRecommendation)?.name }}</strong>
+                      <small>{{ stapleOf(bubble.menuRecommendation)?.suggested_quantity }}</small>
+                      <small v-if="stapleOf(bubble.menuRecommendation)?.cooked_quantity">{{ stapleOf(bubble.menuRecommendation)?.cooked_quantity }}</small>
+                      <em v-if="ingredientLine(stapleOf(bubble.menuRecommendation) || {})">{{ ingredientLine(stapleOf(bubble.menuRecommendation) || {}) }}</em>
+                    </article>
+                  </div>
+                </div>
+                <p v-if="bubble.menuRecommendation.portion_note" class="menu-portion-note">{{ bubble.menuRecommendation.portion_note }}</p>
               </section>
 
               <div v-if="bubble.procurementSuggestions?.length" class="procurement-suggestions">
@@ -1178,51 +1314,64 @@ function stopGeneration() {
           @keydown.enter.exact.prevent="send()"
         />
         <div class="input-actions">
-          <div ref="dinerSelectorEl" class="diner-selector" :class="{ open: dinerPickerOpen }">
-            <button class="diner-selector-trigger" type="button" @click.stop="dinerPickerOpen = !dinerPickerOpen">
-              <span class="diner-selector-leading"><el-icon><User /></el-icon></span>
-              <span class="diner-selector-copy">
-                <strong>本次用餐人员</strong>
-                <small>{{ dinerSummary }} · 默认勾选常驻成员</small>
-              </span>
-              <span class="diner-selector-count">{{ selectedDiners.length }} 人</span>
-              <span class="diner-selector-chevron">{{ dinerPickerOpen ? '⌃' : '⌄' }}</span>
-            </button>
-            <div v-if="dinerPickerOpen" class="diner-picker" @pointerdown.stop>
-              <div class="diner-picker-head">
-                <strong>这顿饭谁来吃？</strong>
-                <small>所选人员与人数将随需求发送；当前规划仍读取全家约束</small>
-              </div>
-              <el-checkbox-group v-model="selectedDinerIds" class="diner-options">
-                <el-checkbox
-                  v-for="member in household?.members ?? []"
-                  :key="member.user_id"
-                  :value="member.user_id"
-                  border
-                  :disabled="sending"
-                >
-                  <span>{{ member.display_name }}</span>
-                  <small>{{ member.residency === 'resident' ? '常驻' : '访客' }}</small>
-                </el-checkbox>
-              </el-checkbox-group>
-              <p v-if="!household" class="diner-load-hint">家庭档案暂未加载，请重试。</p>
-              <el-button v-if="!household" size="small" text @click="loadHousehold">重新加载</el-button>
-              <div class="diner-picker-foot">
-                <span>已选择 {{ selectedDiners.length }} 人</span>
-                <el-button size="small" type="primary" @click="dinerPickerOpen = false">完成选择</el-button>
-              </div>
+          <el-popover v-model:visible="dinerPickerOpen" trigger="click" placement="top-start" :width="330" popper-class="mealflow-diner-popover" :disabled="sending">
+            <template #reference>
+              <button class="model-trigger diner-trigger" type="button" :disabled="sending" aria-label="选择本次用餐人员" :title="dinerTriggerLabel()">
+                <span class="model-spark"><el-icon><User /></el-icon></span>
+                <span>{{ dinerTriggerLabel() }}</span>
+                <small v-if="selectedDiners.length" class="diner-count">{{ selectedDiners.length }} 人</small>
+                <el-icon class="model-chevron" :class="{ open: dinerPickerOpen }"><ArrowDown /></el-icon>
+              </button>
+            </template>
+            <div class="model-menu-head"><strong>这顿饭谁来吃？</strong><span>已选 {{ selectedDiners.length }} 人</span></div>
+            <el-checkbox-group v-model="selectedDinerIds" class="diner-options">
+              <el-checkbox
+                v-for="member in household?.members ?? []"
+                :key="member.user_id"
+                :value="member.user_id"
+                border
+                :disabled="sending"
+              >
+                <span>{{ member.display_name }}</span>
+                <small>{{ member.residency === 'resident' ? '常驻' : '访客' }}</small>
+              </el-checkbox>
+            </el-checkbox-group>
+            <p v-if="!household" class="diner-load-hint">家庭档案暂未加载，请重试。</p>
+            <el-button v-if="!household" size="small" text @click="loadHousehold">重新加载</el-button>
+            <p class="diner-note">所选人员与人数将随需求发送；当前规划仍读取全家约束</p>
+            <div class="diner-picker-foot">
+              <span>已选择 {{ selectedDiners.length }} 人</span>
+              <el-button size="small" type="primary" @click="dinerPickerOpen = false">完成选择</el-button>
             </div>
-          </div>
-          <el-button
+          </el-popover>
+          <div class="composer-send-actions">
+          <el-popover v-model:visible="modelMenuOpen" trigger="click" placement="top-start" :width="300" popper-class="mealflow-model-popover" :disabled="sending">
+            <template #reference>
+              <button class="model-trigger" type="button" :disabled="sending" aria-label="选择对话模型">
+                <span class="model-spark">{{ selectedModel ? modelMonogram(selectedModel) : '✦' }}</span>
+                <span>{{ selectedModel?.label || '默认模型' }}</span>
+                <el-icon class="model-chevron" :class="{ open: modelMenuOpen }"><ArrowDown /></el-icon>
+              </button>
+            </template>
+            <div class="model-menu-head"><strong>选择模型</strong><span>用于下一条消息</span></div>
+            <button v-for="model in chatModels" :key="model.id" class="model-option" :class="{ selected: model.id === selectedModelId }" type="button" :disabled="!model.enabled" @click="chooseModel(model)">
+              <span class="model-monogram">{{ modelMonogram(model) }}</span>
+              <span class="model-option-copy"><strong>{{ model.label }} <small v-if="model.default">默认</small><small v-if="model.is_free" class="model-free-badge">免费</small></strong><span>{{ modelHint(model) }}</span></span>
+              <span v-if="model.id === selectedModelId" class="model-check">✓</span>
+            </button>
+            <p v-if="!chatModels.length" class="model-empty">模型列表暂不可用 <button type="button" @click="loadChatModels">重试</button></p>
+          </el-popover>
+          <button
             v-if="!sending"
-            type="primary"
-            round
+            class="send-btn"
+            type="button"
             :disabled="input.trim().length < 2 || (household !== null && !selectedDiners.length)"
             @click="send()"
           >
             发送 ⏎
-          </el-button>
-          <el-button v-else class="stop-btn" round @click="stopGeneration">⏹ 停止生成</el-button>
+          </button>
+          <button v-else class="send-btn stop-btn" type="button" @click="stopGeneration">⏹ 停止生成</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1696,6 +1845,18 @@ function stopGeneration() {
 .hero-chips .el-button:hover { border-color: var(--green-2); background: #f3f8f5; }
 .chip-icon { margin-right: 4px; color: var(--gold); }
 .msg-row { display: flex; }
+.model-switch-note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 2px 0 -4px;
+  padding: 0 2px;
+  color: #8b9b95;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.model-switch-note strong { color: #667c72; font-weight: 500; }
+.model-switch-icon { color: #9baaa3; font-size: 14px; }
 .stopped-note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .msg-row.user { justify-content: flex-end; }
 .user-bubble {
@@ -1790,6 +1951,17 @@ function stopGeneration() {
 }
 .activity-label { color: var(--ink); font-weight: 650; white-space: nowrap; }
 .activity-bar small { overflow: hidden; color: #81938e; text-overflow: ellipsis; white-space: nowrap; }
+.activity-bar { min-width: 220px; padding: 10px 12px; gap: 10px; border-radius: 12px; background: #f6faf8; border-color: #e0ece6; }
+.activity-orb { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; border-radius: 9px; background: #e6f2ec; color: #337c60; animation: activity-breathe 1.8s ease-in-out infinite; }
+.activity-copy { display: grid; min-width: 0; gap: 2px; }
+.activity-copy strong { color: #395b4e; font-size: 12px; font-weight: 600; }
+.activity-copy small { font-size: 11px; }
+.activity-dots { display: flex; gap: 3px; margin-left: auto; padding-left: 12px; }
+.activity-dots i { width: 3px; height: 3px; border-radius: 50%; background: #7eaa95; animation: activity-breathe 1.2s ease-in-out infinite; }
+.activity-dots i:nth-child(2) { animation-delay: .15s; }
+.activity-dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes activity-breathe { 0%, 100% { opacity: .4; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .activity-orb, .activity-dots i { animation: none; } }
 .mini-spinner {
   display: inline-block;
   width: 10px;
@@ -1829,6 +2001,9 @@ function stopGeneration() {
 .menu-recommendation-items article.purchase_optional small { color: #a16c24; }
 .menu-recommendation-items article.restricted small { color: #b4534b; }
 .menu-recommendation-items em { grid-column: 1 / -1; color: #85958f; font-size: 11.5px; font-style: normal; }
+.menu-group { margin-top: 8px; }
+.menu-group h4 { margin: 0 0 4px; color: #56726a; font-size: 12px; font-weight: 600; }
+.menu-relaxation, .menu-portion-note { margin: 4px 0 0; color: #85958f; font-size: 11.5px; }
 .procurement-suggestions { margin: 0 0 .7rem; padding: 10px 12px; border: 1px solid #ead9ad; border-radius: 10px; background: #fffcf4; color: #695b3d; font-size: 13px; }
 .procurement-suggestions > p { margin: 4px 0 8px; color: #8a7c5c; font-size: 12px; }
 .procurement-suggestion-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 0; }
@@ -2061,75 +2236,99 @@ function stopGeneration() {
   padding: 0.6rem 0.7rem 0.5rem;
   box-shadow: 0 6px 24px rgba(33, 60, 54, 0.07);
 }
-.diner-selector {
-  position: relative;
-  width: 330px;
-  flex: 0 0 330px;
-  margin-top: 0;
-}
-
-.diner-selector-trigger {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  border: 0;
-  background: transparent;
-  padding: 4px 4px 3px;
-  color: var(--ink);
-  text-align: left;
-}
-.diner-selector-trigger:hover { color: var(--green); }
-.diner-selector-leading {
-  width: 27px;
-  height: 27px;
-  display: grid;
-  place-items: center;
-  border-radius: 9px;
-  background: #e9f3ef;
-  color: var(--green);
-}
-.diner-selector-copy { flex: 1; display: grid; gap: 1px; }
-.diner-selector-copy strong { font-size: 12px; }
-.diner-selector-copy small { color: var(--muted); font-size: 11px; }
-.diner-selector-count,
-.diner-selector-chevron {
-  height: 27px;
+.model-trigger {
   display: inline-flex;
   align-items: center;
-  line-height: 1;
+  gap: 7px;
+  min-width: 166px;
+  height: 34px;
+  padding: 0 11px 0 8px;
+  border: 1px solid #dbe8e2;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #ffffff, #f7fbf9);
+  color: #24483e;
+  font-size: 12px;
+  font-weight: 650;
+  box-shadow: 0 2px 8px rgba(38, 83, 70, 0.05);
+  transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
 }
-.diner-selector-count { color: var(--green); font-size: 12px; font-weight: 700; white-space: nowrap; }
-.diner-selector-chevron {
-  width: 18px;
-  flex: 0 0 18px;
-  justify-content: center;
-  color: #8da09a;
-  font-size: 15px;
-  font-weight: 700;
+.model-trigger:hover:not(:disabled) {
+  border-color: #9bc8b5;
+  box-shadow: 0 5px 14px rgba(38, 83, 70, 0.11);
+  transform: translateY(-1px);
 }
-.diner-picker {
-  position: absolute;
-  z-index: 10;
-  right: 0;
-  bottom: calc(100% + 9px);
-  width: min(390px, 100%);
-  padding: 14px;
-  border: 1px solid #d8e5df;
+.model-trigger:disabled { cursor: not-allowed; opacity: .62; }
+.model-spark {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 7px;
+  background: #e1f1e9;
+  color: #0f7555;
+  font-size: 13px;
+}
+.model-chevron { margin-left: auto; color: #78948a; transition: transform .18s ease; }
+.model-chevron.open { transform: rotate(180deg); }
+.model-menu-head { display: flex; align-items: baseline; justify-content: space-between; margin: -2px 0 8px; }
+.model-menu-head strong { color: #24483e; font-size: 13px; }
+.model-menu-head span { color: #91a59e; font-size: 11px; }
+.model-option {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 9px;
+  padding: 9px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #294c42;
+  text-align: left;
+  transition: background .15s ease;
+}
+.model-option:hover:not(:disabled), .model-option.selected { background: #eef8f3; }
+.model-option:disabled { cursor: not-allowed; opacity: .45; }
+.model-monogram { display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 28px; border-radius: 9px; background: #e8f3ee; color: #147354; font-size: 12px; font-weight: 800; }
+.model-option-copy { display: grid; min-width: 0; flex: 1; gap: 2px; }
+.model-option-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.model-option-copy strong small { margin-left: 4px; color: #19815d; font-size: 10px; font-weight: 700; }
+.model-option-copy strong .model-free-badge { color: #197a55; background: #e5f6ec; border-radius: 5px; padding: 2px 5px; }
+.model-option-copy span { overflow: hidden; color: #8a9e97; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.model-check { color: #13815c; font-size: 15px; font-weight: 800; }
+.model-empty { margin: 6px 2px 0; color: #8a9e97; font-size: 11px; }
+.model-empty button { padding: 0; border: 0; background: transparent; color: #13815c; cursor: pointer; }
+:global(.mealflow-model-popover.el-popper) {
+  padding: 12px !important;
+  border: 1px solid #dce9e3;
   border-radius: 14px;
-  background: rgba(255,255,255,.98);
-  box-shadow: 0 16px 38px rgba(28,65,57,.16);
+  box-shadow: 0 16px 40px rgba(31, 73, 61, .16);
 }
-.diner-picker-head { display: grid; gap: 3px; margin-bottom: 11px; }
-.diner-picker-head strong { font-size: 13px; }
-.diner-picker-head small { color: var(--muted); font-size: 11px; }
-.diner-options { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
-.diner-options { max-height: 180px; overflow-y: auto; }
-.diner-load-hint { font-size: 12px; color: var(--muted); }
-.diner-options :deep(.el-checkbox) { width: 100%; margin: 0; padding: 8px 10px; border-radius: 9px; }
-.diner-options :deep(.el-checkbox__label) { display: flex; align-items: center; justify-content: space-between; flex: 1; gap: 8px; font-size: 12px; }
-.diner-options :deep(.el-checkbox__label small) { color: var(--muted); font-size: 10px; }
-.diner-picker-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; color: var(--muted); font-size: 11px; }
+:global(.mealflow-model-popover .model-menu-head) { display: flex; align-items: baseline; justify-content: space-between; margin: -2px 0 8px; }
+:global(.mealflow-model-popover .model-menu-head strong) { color: #24483e; font-size: 13px; }
+:global(.mealflow-model-popover .model-menu-head span) { color: #91a59e; font-size: 11px; }
+:global(.mealflow-model-popover .model-option) { display: flex; align-items: center; width: 100%; gap: 9px; padding: 9px 8px; border: 0; border-radius: 10px; background: transparent; color: #294c42; text-align: left; }
+:global(.mealflow-model-popover .model-option:hover:not(:disabled)), :global(.mealflow-model-popover .model-option.selected) { background: #eef8f3; }
+:global(.mealflow-model-popover .model-option-copy) { display: grid; min-width: 0; flex: 1; gap: 2px; }
+:global(.mealflow-model-popover .model-option-copy strong) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+:global(.mealflow-model-popover .model-option-copy span) { overflow: hidden; color: #8a9e97; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+:global(.mealflow-model-popover .model-monogram) { display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 28px; border-radius: 9px; background: #e8f3ee; color: #147354; font-size: 12px; font-weight: 800; }
+.diner-trigger { min-width: 150px; }
+:global(.mealflow-diner-popover.el-popper) {
+  padding: 12px !important;
+  border: 1px solid #dce9e3;
+  border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(31, 73, 61, .16);
+}
+:global(.mealflow-diner-popover .model-menu-head) { display: flex; align-items: baseline; justify-content: space-between; margin: -2px 0 8px; }
+:global(.mealflow-diner-popover .model-menu-head strong) { color: #24483e; font-size: 13px; }
+:global(.mealflow-diner-popover .model-menu-head span) { color: #91a59e; font-size: 11px; }
+:global(.mealflow-diner-popover .diner-options) { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; max-height: 200px; overflow-y: auto; }
+:global(.mealflow-diner-popover .diner-options .el-checkbox) { width: 100%; margin: 0; padding: 8px 10px; border-radius: 9px; }
+:global(.mealflow-diner-popover .diner-options .el-checkbox__label) { display: flex; align-items: center; justify-content: space-between; flex: 1; gap: 8px; font-size: 12px; }
+:global(.mealflow-diner-popover .diner-options .el-checkbox__label small) { color: var(--muted); font-size: 10px; }
+:global(.mealflow-diner-popover .diner-load-hint) { font-size: 12px; color: var(--muted); }
+:global(.mealflow-diner-popover .diner-note) { margin: 8px 2px 0; color: #8a9e97; font-size: 11px; }
+:global(.mealflow-diner-popover .diner-picker-foot) { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; color: var(--muted); font-size: 11px; }
 .procurement-link { margin-left: auto; font-size: 12px; color: var(--green); text-decoration: none; white-space: nowrap; }
 .procurement-link:hover { text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) {
@@ -2147,13 +2346,72 @@ function stopGeneration() {
 }
 .input-actions {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
   gap: 12px;
   margin-top: 0.4rem;
 }
+.composer-send-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+.composer-send-actions .send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  font-family: inherit;
+  min-width: 82px;
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid #176f52;
+  border-radius: 10px;
+  background: #176f52;
+  box-shadow: 0 5px 14px rgba(23, 111, 82, .18);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .01em;
+  transition: background .18s ease, border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+.composer-send-actions .send-btn:hover:not(:disabled) {
+  border-color: #0f6046;
+  background: #0f6046;
+  box-shadow: 0 8px 18px rgba(23, 111, 82, .24);
+  transform: translateY(-1px);
+}
+.composer-send-actions .send-btn:active:not(:disabled) {
+  box-shadow: 0 3px 8px rgba(23, 111, 82, .16);
+  transform: translateY(0);
+}
+.composer-send-actions .send-btn:disabled {
+  cursor: not-allowed;
+  border-color: #c5d8cf;
+  background: #c5d8cf;
+  box-shadow: none;
+}
+.composer-send-actions .send-btn.stop-btn {
+  border-color: #78988b;
+  background: #f5f9f7;
+  color: #4c6d60;
+  box-shadow: none;
+}
+.composer-send-actions .send-btn.stop-btn:hover:not(:disabled) {
+  border-color: #a5bdb3;
+  background: #edf5f1;
+  box-shadow: 0 5px 14px rgba(52, 91, 76, .1);
+}
+.composer-send-actions .send-btn:focus-visible {
+  outline: 2px solid #7eb69f;
+  outline-offset: 3px;
+}
+.diner-count { flex-shrink: 0; font-size: 11px; font-weight: 500; color: #78948a; }
+.diner-trigger { max-width: min(420px, 46vw); }
+.diner-trigger > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .error-message { margin-top: 0.4rem; }
 @media (max-width: 640px) {
+  .input-actions { align-items: stretch; flex-wrap: wrap; }
+  .composer-send-actions { max-width: 100%; }
+  .composer-send-actions .model-trigger { min-width: 0; }
+  .diner-trigger { min-width: 0; max-width: 100%; }
   .session-toolbar { align-items: flex-start; gap: 10px; }
   .current-session-copy strong { max-width: 42vw; }
   .history-trigger,
