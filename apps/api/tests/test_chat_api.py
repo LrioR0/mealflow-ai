@@ -321,7 +321,7 @@ async def test_list_sessions_returns_recent() -> None:
     assert isinstance(sessions, list) and sessions
     target = next(item for item in sessions if item["session_id"] == session_id)
     assert target["title"] == "明天中午我俩想吃豆角焖面,预算 60 块"[:20]
-    assert target["updated_at"]
+    assert target["updated_at"].endswith("+00:00")
     # 倒序:第一条应为最近更新的会话
     updated = [item["updated_at"] for item in sessions]
     assert updated == sorted(updated, reverse=True)
@@ -346,6 +346,70 @@ async def test_delete_session_removes_messages() -> None:
 
         repeat = await client.delete(f"/api/v1/agent/chat/{session_id}")
         assert repeat.status_code == 404
+
+
+async def test_clear_workspace_sessions_preserves_current_and_other_workspace() -> None:
+    """批量清理只作用于目标工作区，并完整保留显式排除的当前会话。"""
+    from app.db.models import AgentChatMessage, AgentChatSession, Workspace
+    from app.db.session import SessionLocal
+
+    with SessionLocal() as session:
+        session.add(Workspace(id="other-workspace", name="另一个家庭", kind="personal"))
+        session.flush()
+        other_session = AgentChatSession(workspace_id="other-workspace", title="其他家庭对话")
+        session.add(other_session)
+        session.flush()
+        session.add(
+            AgentChatMessage(
+                session_id=other_session.id,
+                role="user",
+                content="另一个家庭的对话",
+            )
+        )
+        other_id = other_session.id
+        session.commit()
+
+    client = await _client()
+    async with client:
+        current_events = await _stream(client, "当前对话：今晚吃清淡一点")
+        current_id = _single(current_events, "done")["session_id"]
+        old_events = await _stream(client, "历史对话：明天吃面")
+        old_id = _single(old_events, "done")["session_id"]
+
+        cleared = await client.delete(
+            "/api/v1/agent/chat/sessions",
+            params={
+                "workspace_id": "home-workspace",
+                "exclude_session_id": current_id,
+            },
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["deleted_sessions"] >= 1
+        assert cleared.json()["deleted_messages"] >= 1
+
+        count = await client.get(
+            "/api/v1/agent/chat/sessions/count",
+            params={
+                "workspace_id": "home-workspace",
+                "exclude_session_id": current_id,
+            },
+        )
+        assert count.status_code == 200
+        assert count.json() == {"count": 0}
+
+        assert (await client.get(f"/api/v1/agent/chat/{current_id}")).status_code == 200
+        assert (await client.get(f"/api/v1/agent/chat/{old_id}")).status_code == 404
+        assert (await client.get(f"/api/v1/agent/chat/{other_id}")).status_code == 200
+
+        repeated = await client.delete(
+            "/api/v1/agent/chat/sessions",
+            params={
+                "workspace_id": "home-workspace",
+                "exclude_session_id": current_id,
+            },
+        )
+        assert repeated.status_code == 200
+        assert repeated.json() == {"deleted_sessions": 0, "deleted_messages": 0}
 
 
 async def test_session_restore_after_chat() -> None:

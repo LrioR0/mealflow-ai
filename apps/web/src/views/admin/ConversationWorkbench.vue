@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { createProcurementItem, fetchProcurement, generateProcurement } from '../../composables/procurement'
 import { useAgentHandoffStore } from '../../stores/agentHandoff'
 
-import { ArrowDown, Delete, User } from '@element-plus/icons-vue'
+import { ArrowDown, Close, Delete, Search, User } from '@element-plus/icons-vue'
 
 import {
   conversationStarted,
@@ -13,8 +13,10 @@ import {
 
 import {
   createHouseholdEvent,
+  deleteChatSessions,
   deleteChatSession,
   fetchChatSession,
+  fetchChatSessionCount,
   fetchChatSessions,
   fetchHousehold,
   fetchRecipeDetail,
@@ -166,16 +168,48 @@ const CHAT_SCROLL_KEY = 'mealflow_agent_chat_scroll_top_v1'
 const CHAT_SESSION_KEY = 'mealflow_agent_chat_session_id_v1'
 const savedChatScrollTop = ref(0)
 
-// ===== 会话管理:历史下拉 + 新建对话 + 刷新恢复 =====
-const sessionMenuOpen = ref(false)
-const sessionMenuEl = ref<HTMLElement | null>(null)
+// ===== 会话管理:紧凑工具栏 + 历史抽屉 + 刷新恢复 =====
+const historyDrawerOpen = ref(false)
+const historySearch = ref('')
 const sessions = ref<ChatSessionSummary[]>([])
+const totalHistoryCount = ref(0)
 const sessionsLoading = ref(false)
 const restoring = ref(false)
+const deletingSessionId = ref<string | null>(null)
+const clearingHistory = ref(false)
 
 const activeSessionTitle = computed(
-  () => sessions.value.find((item) => item.session_id === sessionId.value)?.title ?? '当前对话',
+  () => sessions.value.find((item) => item.session_id === sessionId.value)?.title ?? '新对话',
 )
+const historyCount = computed(() => totalHistoryCount.value)
+const sessionOperationBusy = computed(
+  () => sending.value || restoring.value || clearingHistory.value || Boolean(deletingSessionId.value),
+)
+
+const filteredSessions = computed(() => {
+  const keyword = historySearch.value.trim().toLocaleLowerCase('zh-CN')
+  if (!keyword) return sessions.value
+  return sessions.value.filter((item) => item.title.toLocaleLowerCase('zh-CN').includes(keyword))
+})
+
+const historyGroups = computed(() => {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const recentBoundary = new Date(today)
+  recentBoundary.setDate(recentBoundary.getDate() - 6)
+  const groups = [
+    { key: 'today', label: '今天', items: [] as ChatSessionSummary[] },
+    { key: 'recent', label: '近 7 天', items: [] as ChatSessionSummary[] },
+    { key: 'earlier', label: '更早', items: [] as ChatSessionSummary[] },
+  ]
+  for (const item of filteredSessions.value) {
+    const updatedAt = new Date(item.updated_at)
+    if (updatedAt >= today) groups[0].items.push(item)
+    else if (updatedAt >= recentBoundary) groups[1].items.push(item)
+    else groups[2].items.push(item)
+  }
+  return groups.filter((group) => group.items.length)
+})
 
 function relativeTime(iso: string): string {
   const delta = Date.now() - new Date(iso).getTime()
@@ -191,20 +225,26 @@ function relativeTime(iso: string): string {
 async function loadSessions() {
   sessionsLoading.value = true
   try {
-    sessions.value = await fetchChatSessions()
+    const [items, total] = await Promise.all([
+      fetchChatSessions(),
+      fetchChatSessionCount('home-workspace', sessionId.value),
+    ])
+    sessions.value = items
+    totalHistoryCount.value = total.count
   } catch {
-    // 列表加载失败不打断对话,下拉里显示空态
+    // 历史加载失败不打断当前对话，抽屉保留上一次成功结果。
   } finally {
     sessionsLoading.value = false
   }
 }
 
-function toggleSessionMenu() {
-  sessionMenuOpen.value = !sessionMenuOpen.value
-  if (sessionMenuOpen.value) void loadSessions()
+function openHistoryDrawer() {
+  historyDrawerOpen.value = true
+  historySearch.value = ''
+  void loadSessions()
 }
 
-// 新建对话:界面清空,旧会话保留在库里,可从下拉重新进入
+// 新建对话:界面清空,旧会话保留在库里,可从历史抽屉重新进入
 function startNewSession() {
   if (sending.value || restoring.value) return
   currentAbort.value?.abort()
@@ -213,45 +253,86 @@ function startNewSession() {
   messages.value = []
   expandedDish.value = null
   followLatest.value = true
-  sessionMenuOpen.value = false
+  historyDrawerOpen.value = false
+  void loadSessions()
 }
 
 // 删除历史会话:确认后删除;若删的是当前打开的会话,界面同步清空
 async function removeSession(item: ChatSessionSummary) {
-  if (sending.value || restoring.value) return
+  if (sessionOperationBusy.value) return
   try {
     await ElMessageBox.confirm(`删除「${item.title}」？删除后不可恢复。`, '删除对话', {
       confirmButtonText: '删除',
       cancelButtonText: '取消',
       type: 'warning',
+      customClass: 'history-confirm-box',
+      modalClass: 'history-confirm-overlay',
     })
   } catch {
     return // 用户取消
   }
+  deletingSessionId.value = item.session_id
   try {
     await deleteChatSession(item.session_id)
+    const deletedCurrent = sessionId.value === item.session_id
     sessions.value = sessions.value.filter((entry) => entry.session_id !== item.session_id)
-    if (sessionId.value === item.session_id) {
+    if (deletedCurrent) {
       currentAbort.value?.abort()
       sessionId.value = null
       sessionStorage.removeItem(CHAT_SESSION_KEY)
       messages.value = []
       expandedDish.value = null
+    } else {
+      totalHistoryCount.value = Math.max(0, totalHistoryCount.value - 1)
     }
     ElMessage.success('对话已删除')
   } catch {
     ElMessage.error('删除失败，请重试')
+  } finally {
+    deletingSessionId.value = null
+  }
+}
+
+async function clearHistory() {
+  if (sessionOperationBusy.value || historyCount.value === 0) return
+  const count = historyCount.value
+  try {
+    await ElMessageBox.confirm(
+      `将永久删除当前对话之外的 ${count} 条历史记录，当前对话会保留。`,
+      '清空历史对话',
+      {
+        confirmButtonText: '清空历史',
+        cancelButtonText: '取消',
+        type: 'warning',
+        customClass: 'history-confirm-box',
+        modalClass: 'history-confirm-overlay',
+      },
+    )
+  } catch {
+    return
+  }
+  clearingHistory.value = true
+  try {
+    const result = await deleteChatSessions('home-workspace', sessionId.value)
+    sessions.value = sessions.value.filter((item) => item.session_id === sessionId.value)
+    totalHistoryCount.value = 0
+    historySearch.value = ''
+    ElMessage.success(result.deleted_sessions ? `已清空 ${result.deleted_sessions} 条历史对话` : '没有需要清理的历史对话')
+  } catch {
+    ElMessage.error('清空失败，请重试')
+  } finally {
+    clearingHistory.value = false
   }
 }
 
 // 恢复历史会话:回放消息(思考过程默认收起,可展开回看)
 async function restoreSession(id: string) {
   if (sending.value || restoring.value || id === sessionId.value) {
-    sessionMenuOpen.value = false
+    historyDrawerOpen.value = false
     return
   }
   restoring.value = true
-  sessionMenuOpen.value = false
+  historyDrawerOpen.value = false
   try {
     const view = await fetchChatSession(id)
     currentAbort.value?.abort()
@@ -275,6 +356,7 @@ async function restoreSession(id: string) {
         error: '',
       }),
     )
+    void loadSessions()
     void nextTick(() => {
       const list = listEl.value
       if (list) list.scrollTop = list.scrollHeight
@@ -340,6 +422,7 @@ onActivated(() => {
     ElMessage({ message: '已把需求填入输入框,确认后发送即可', type: 'success', grouping: true })
   }
   void loadHousehold()
+  void loadSessions()
   // 刷新后组件重建:从 sessionStorage 恢复当前会话(KeepAlive 内切换页面则 ref 还在,跳过)
   if (!sessionId.value && !messages.value.length) {
     const saved = sessionStorage.getItem(CHAT_SESSION_KEY)
@@ -361,9 +444,6 @@ function onDocumentPointerDown(event: PointerEvent) {
   const target = event.target as Node | null
   if (dinerPickerOpen.value && target && !dinerSelectorEl.value?.contains(target)) {
     dinerPickerOpen.value = false
-  }
-  if (sessionMenuOpen.value && target && !sessionMenuEl.value?.contains(target)) {
-    sessionMenuOpen.value = false
   }
 }
 
@@ -628,7 +708,12 @@ async function send(preset?: string) {
         if (running >= 0 && trace.status !== 'running') assistant.toolCalls[running] = trace
         else assistant.toolCalls.push(trace)
       } else if (event.event === 'procurement_suggestions') {
-        assistant.procurementSuggestions = (event.data.items as ProcurementSuggestion[]) ?? []
+        const unique = new Map<string, ProcurementSuggestion>()
+        for (const item of (event.data.items as ProcurementSuggestion[]) ?? []) {
+          const key = `${item.source_id ?? ''}:${item.ingredient}`
+          if (!unique.has(key)) unique.set(key, item)
+        }
+        assistant.procurementSuggestions = [...unique.values()]
       } else if (event.event === 'menu_recommendation') {
         assistant.menuRecommendation = event.data as unknown as MenuRecommendation
       } else if (event.event === 'plan') {
@@ -656,6 +741,7 @@ async function send(preset?: string) {
         assistant.thinkingOpen = Boolean(assistant.candidates?.length)
         sessionId.value = (event.data.session_id as string) ?? sessionId.value
         if (sessionId.value) sessionStorage.setItem(CHAT_SESSION_KEY, sessionId.value)
+        void loadSessions()
         assistant.searchQuery = typeof event.data.search_query === 'string' ? event.data.search_query : undefined
         assistant.toolBudget = event.data.tool_budget as { used: number; limit: number } | undefined
       }
@@ -704,49 +790,25 @@ function stopGeneration() {
 <template>
   <section class="workbench">
     <div class="chat-panel">
-      <!-- 会话栏:新建对话 + 历史会话下拉 -->
-      <div class="session-bar">
-        <button class="new-session-btn" type="button" :disabled="sending || restoring" @click="startNewSession">
-          ＋ 新建对话
-        </button>
-        <div ref="sessionMenuEl" class="session-menu" :class="{ open: sessionMenuOpen }">
-          <button class="session-menu-trigger" type="button" @click.stop="toggleSessionMenu">
-            <span class="session-menu-title">{{ activeSessionTitle }}</span>
-            <span class="session-menu-chevron">{{ sessionMenuOpen ? '⌃' : '⌄' }}</span>
+      <!-- 紧凑会话工具栏:标题只做信息层级，历史管理移入右侧抽屉。 -->
+      <div class="session-toolbar">
+        <div class="current-session-copy">
+          <small>当前对话</small>
+          <strong :title="activeSessionTitle">{{ activeSessionTitle }}</strong>
+        </div>
+        <div class="session-actions">
+          <button
+            class="history-trigger"
+            type="button"
+            :disabled="sessionOperationBusy"
+            @click="openHistoryDrawer"
+          >
+            <span>历史对话</span>
+            <span v-if="historyCount" class="history-count">{{ historyCount }}</span>
           </button>
-          <div v-if="sessionMenuOpen" class="session-menu-panel" @pointerdown.stop>
-            <div class="session-menu-head">
-              <strong>历史对话</strong>
-              <small>点击恢复,最近优先</small>
-            </div>
-            <div v-if="sessionsLoading" class="session-menu-empty">加载中…</div>
-            <div v-else-if="!sessions.length" class="session-menu-empty">暂无历史会话</div>
-            <div
-              v-for="item in sessions"
-              v-else
-              :key="item.session_id"
-              class="session-menu-row"
-            >
-              <button
-                class="session-menu-item"
-                :class="{ active: item.session_id === sessionId }"
-                type="button"
-                @click="restoreSession(item.session_id)"
-              >
-                <span class="session-item-title">{{ item.title }}</span>
-                <small class="session-item-time">{{ relativeTime(item.updated_at) }}</small>
-              </button>
-              <button
-                class="session-delete-btn"
-                type="button"
-                title="删除对话"
-                :disabled="sending || restoring"
-                @click.stop="removeSession(item)"
-              >
-                <el-icon><Delete /></el-icon>
-              </button>
-            </div>
-          </div>
+          <button class="new-session-btn" type="button" :disabled="sessionOperationBusy" @click="startNewSession">
+            ＋ 新建对话
+          </button>
         </div>
       </div>
 
@@ -1165,8 +1227,92 @@ function stopGeneration() {
       </div>
     </div>
 
+    <Teleport to="body">
+      <Transition name="history-drawer">
+        <div
+          v-if="historyDrawerOpen"
+          class="history-backdrop"
+          @pointerdown.self="historyDrawerOpen = false"
+        >
+          <aside class="history-drawer-panel" role="dialog" aria-modal="true" aria-label="历史对话">
+            <header class="history-drawer-head">
+              <div>
+                <span class="drawer-kicker">CONVERSATIONS</span>
+                <h3>历史对话</h3>
+                <p>查找、恢复或整理之前的对话</p>
+              </div>
+              <button class="drawer-close" type="button" aria-label="关闭历史对话" @click="historyDrawerOpen = false">
+                <el-icon><Close /></el-icon>
+              </button>
+            </header>
+
+            <label class="history-search">
+              <el-icon><Search /></el-icon>
+              <input v-model="historySearch" type="search" placeholder="搜索对话标题" />
+            </label>
+
+            <div class="history-drawer-body">
+              <div v-if="sessionsLoading" class="history-empty">正在读取历史对话…</div>
+              <div v-else-if="!filteredSessions.length" class="history-empty">
+                <strong>{{ historySearch ? '没有匹配的对话' : '还没有历史对话' }}</strong>
+                <span>{{ historySearch ? '换个关键词再试试' : '完成一次对话后会保存在这里' }}</span>
+              </div>
+              <section v-for="group in historyGroups" v-else :key="group.key" class="history-group">
+                <h4>{{ group.label }}</h4>
+                <div v-for="item in group.items" :key="item.session_id" class="history-row" :class="{ active: item.session_id === sessionId }">
+                  <button
+                    class="history-open"
+                    type="button"
+                    :disabled="sessionOperationBusy"
+                    @click="restoreSession(item.session_id)"
+                  >
+                    <span class="history-row-title">{{ item.title }}</span>
+                    <span class="history-row-meta">
+                      <em v-if="item.session_id === sessionId">当前对话</em>
+                      <small>{{ relativeTime(item.updated_at) }}</small>
+                    </span>
+                  </button>
+                  <button
+                    class="history-delete"
+                    type="button"
+                    :title="`删除「${item.title}」`"
+                    :aria-label="`删除「${item.title}」`"
+                    :disabled="sessionOperationBusy"
+                    @click.stop="removeSession(item)"
+                  >
+                    <el-icon v-if="deletingSessionId !== item.session_id"><Delete /></el-icon>
+                    <span v-else class="button-spinner"></span>
+                  </button>
+                </div>
+              </section>
+            </div>
+
+            <footer class="history-drawer-foot">
+              <p>清空历史会保留当前正在查看的对话。</p>
+              <button
+                class="clear-history-btn"
+                type="button"
+                :disabled="sessionOperationBusy || historyCount === 0"
+                @click="clearHistory"
+              >
+                <span v-if="clearingHistory" class="button-spinner"></span>
+                <el-icon v-else><Delete /></el-icon>
+                {{ clearingHistory ? '正在清空…' : `清空历史${historyCount ? ` (${historyCount})` : ''}` }}
+              </button>
+            </footer>
+          </aside>
+        </div>
+      </Transition>
+    </Teleport>
+
   </section>
 </template>
+
+<style>
+/* Element Plus 消息框挂载到 body；层级必须高于历史抽屉(2200)。 */
+.history-confirm-overlay.el-overlay { z-index: 3100 !important; }
+.history-confirm-box { z-index: 3101 !important; }
+</style>
 
 <style scoped>
 .workbench {
@@ -1182,139 +1328,306 @@ function stopGeneration() {
   gap: 0.7rem;
   min-height: 0;
 }
-/* ===== 会话栏:新建 + 历史下拉(diner-selector 同语言) ===== */
-.session-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 2px 0 8px;
-}
-.new-session-btn {
-  flex-shrink: 0;
-  padding: 7px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--green);
-  font-size: 12.5px;
-  font-weight: 650;
-  transition: 0.15s ease;
-}
-.new-session-btn:hover:not(:disabled) {
-  border-color: var(--green-2);
-  transform: translateY(-1px);
-}
-.new-session-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.session-menu { position: relative; flex: 1; min-width: 0; }
-.session-menu-trigger {
-  width: 100%;
+/* ===== 会话工具栏 ===== */
+.session-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 7px 11px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.68);
-  cursor: pointer;
-  transition: border-color 0.15s ease;
+  gap: 18px;
+  min-height: 42px;
+  padding: 0 2px 7px;
+  border-bottom: 1px solid rgba(211, 220, 215, 0.78);
 }
-.session-menu-trigger:hover { border-color: var(--green-2); }
-.session-menu.open .session-menu-trigger { border-color: var(--green-2); }
-.session-menu-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--ink);
+.current-session-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
 }
-.session-menu-chevron { color: var(--muted); font-size: 12px; flex-shrink: 0; }
-.session-menu-panel {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  right: 0;
-  z-index: 60;
-  max-height: 320px;
-  overflow-y: auto;
-  padding: 6px;
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 14px 38px rgba(33, 60, 54, 0.13);
-}
-.session-menu-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  padding: 4px 8px 8px;
-  border-bottom: 1px solid #eef2ef;
-  margin-bottom: 4px;
-}
-.session-menu-head strong { font-size: 12.5px; color: var(--ink); }
-.session-menu-head small { color: var(--muted); font-size: 11px; }
-.session-menu-empty {
-  padding: 18px 8px;
-  text-align: center;
+.current-session-copy small {
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: 10.5px;
+  line-height: 1.2;
 }
-.session-menu-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-.session-menu-row .session-menu-item { flex: 1; min-width: 0; }
-.session-menu-item {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: none;
-  text-align: left;
-  cursor: pointer;
-  transition: background 0.14s ease;
-}
-.session-menu-item:hover { background: #f1f7f3; }
-.session-menu-item.active { background: #e7f2ee; }
-.session-item-title {
+.current-session-copy strong {
+  max-width: 430px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
   color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
 }
-.session-menu-item.active .session-item-title { color: var(--green); font-weight: 650; }
-.session-item-time { flex-shrink: 0; color: var(--muted); font-size: 11px; }
-/* 悬浮渐显的删除小按钮(与消息复制按钮同一动画语言) */
-.session-delete-btn {
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   flex-shrink: 0;
+}
+.history-trigger,
+.new-session-btn {
+  min-height: 34px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  margin-right: 4px;
-  border: 0;
-  border-radius: 7px;
-  background: none;
-  color: var(--muted);
+  gap: 7px;
+  padding: 7px 12px;
+  border-radius: 9px;
+  font-size: 12.5px;
+  font-weight: 650;
   cursor: pointer;
-  opacity: 0;
-  transform: translateX(3px);
-  transition: opacity 0.22s ease, transform 0.22s ease, color 0.15s ease, background 0.15s ease;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
-.session-menu-row:hover .session-delete-btn {
-  opacity: 1;
-  transform: translateX(0);
+.history-trigger {
+  border: 1px solid transparent;
+  background: transparent;
+  color: #657872;
 }
-.session-delete-btn:hover:not(:disabled) { background: #fdeceb; color: #a43c36; }
-.session-delete-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.history-trigger:hover:not(:disabled) {
+  border-color: #d9e5e0;
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--green);
+}
+.history-count {
+  min-width: 20px;
+  height: 20px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #e6f1ed;
+  color: var(--green);
+  font-size: 10.5px;
+}
+.new-session-btn {
+  border: 1px solid var(--green);
+  background: var(--green);
+  color: #fff;
+}
+.new-session-btn:hover:not(:disabled) {
+  border-color: #17665c;
+  background: #17665c;
+}
+.history-trigger:disabled,
+.new-session-btn:disabled { opacity: 0.48; cursor: not-allowed; }
+
+/* ===== 覆盖式历史抽屉:不占用工作台正文宽度 ===== */
+.history-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(20, 34, 30, 0.2);
+  backdrop-filter: blur(1.5px);
+}
+.history-drawer-panel {
+  width: min(360px, calc(100vw - 24px));
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 22px 18px 16px;
+  background: #fbfaf6;
+  border-left: 1px solid #d9e1dc;
+  box-shadow: -18px 0 50px rgba(28, 49, 43, 0.13);
+}
+.history-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 2px 17px;
+}
+.drawer-kicker {
+  color: #2b7b6e;
+  font-size: 9.5px;
+  font-weight: 750;
+  letter-spacing: 0.15em;
+}
+.history-drawer-head h3 {
+  margin: 4px 0 2px;
+  color: #173a35;
+  font-size: 20px;
+  font-weight: 680;
+}
+.history-drawer-head p {
+  margin: 0;
+  color: #7d8d88;
+  font-size: 12px;
+}
+.drawer-close {
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #71817c;
+  cursor: pointer;
+}
+.drawer-close:hover { background: #edf2ef; color: #164f47; }
+.history-search {
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 2px 12px;
+  padding: 0 11px;
+  border: 1px solid #d8e1dc;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #8b9995;
+}
+.history-search:focus-within {
+  border-color: #75a79d;
+  box-shadow: 0 0 0 3px rgba(47, 126, 112, 0.09);
+}
+.history-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #173a35;
+  font: inherit;
+  font-size: 13px;
+}
+.history-search input::placeholder { color: #9ca8a4; }
+.history-drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 2px 14px;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5d0 transparent;
+  overscroll-behavior: contain;
+}
+.history-empty {
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: #93a09c;
+  text-align: center;
+  font-size: 12px;
+}
+.history-empty strong { color: #5e706a; font-size: 13px; }
+.history-group + .history-group { margin-top: 15px; }
+.history-group h4 {
+  margin: 0 0 5px;
+  padding: 0 9px;
+  color: #84938e;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  border-radius: 10px;
+  transition: background 0.14s ease;
+}
+.history-row:hover { background: #eff4f1; }
+.history-row.active { background: #e5f0ec; }
+.history-open {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 3px;
+  padding: 10px 6px 10px 10px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.history-open:disabled { cursor: default; }
+.history-row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #294841;
+  font-size: 13px;
+  line-height: 1.35;
+}
+.history-row.active .history-row-title { color: #0f554b; font-weight: 650; }
+.history-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #879690;
+}
+.history-row-meta em {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #d2e7df;
+  color: #176256;
+  font-size: 9.5px;
+  font-style: normal;
+}
+.history-row-meta small { font-size: 10.5px; }
+.history-delete {
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 32px;
+  margin-right: 5px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #8b9995;
+  cursor: pointer;
+}
+.history-delete:hover:not(:disabled) { background: #f8e8e6; color: #ae423b; }
+.history-delete:disabled { opacity: 0.45; cursor: not-allowed; }
+.history-drawer-foot {
+  flex-shrink: 0;
+  padding: 13px 2px 0;
+  border-top: 1px solid #dfe6e2;
+}
+.history-drawer-foot p {
+  margin: 0 0 9px;
+  color: #84928e;
+  font-size: 10.5px;
+}
+.clear-history-btn {
+  width: 100%;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid #e3c7c3;
+  border-radius: 10px;
+  background: #fff8f7;
+  color: #a53d37;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.clear-history-btn:hover:not(:disabled) { border-color: #ce918b; background: #fbecea; }
+.clear-history-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.button-spinner {
+  width: 13px;
+  height: 13px;
+  display: inline-block;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: history-spin 0.75s linear infinite;
+}
+@keyframes history-spin { to { transform: rotate(360deg); } }
+.history-drawer-enter-active,
+.history-drawer-leave-active { transition: background 0.2s ease; }
+.history-drawer-enter-active .history-drawer-panel,
+.history-drawer-leave-active .history-drawer-panel { transition: transform 0.22s ease; }
+.history-drawer-enter-from,
+.history-drawer-leave-to { background: rgba(20, 34, 30, 0); }
+.history-drawer-enter-from .history-drawer-panel,
+.history-drawer-leave-to .history-drawer-panel { transform: translateX(100%); }
 .household-strip {
   display: flex;
   align-items: center;
@@ -1820,7 +2133,11 @@ function stopGeneration() {
 .procurement-link { margin-left: auto; font-size: 12px; color: var(--green); text-decoration: none; white-space: nowrap; }
 .procurement-link:hover { text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) {
-  .response-placeholder, .response-placeholder-dot, .thinking-live { animation: none; }
+  .response-placeholder, .response-placeholder-dot, .thinking-live, .button-spinner { animation: none; }
+  .history-drawer-enter-active,
+  .history-drawer-leave-active,
+  .history-drawer-enter-active .history-drawer-panel,
+  .history-drawer-leave-active .history-drawer-panel { transition: none; }
 }
 .chat-input :deep(.el-textarea__inner) {
   font-size: 14.5px;
@@ -1836,4 +2153,15 @@ function stopGeneration() {
   margin-top: 0.4rem;
 }
 .error-message { margin-top: 0.4rem; }
+@media (max-width: 640px) {
+  .session-toolbar { align-items: flex-start; gap: 10px; }
+  .current-session-copy strong { max-width: 42vw; }
+  .history-trigger,
+  .new-session-btn { padding: 7px 9px; }
+  .history-drawer-panel {
+    width: min(100vw, 430px);
+    padding: 18px 14px 14px;
+    border-left: 0;
+  }
+}
 </style>

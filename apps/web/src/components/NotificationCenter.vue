@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
 import { Bell, CircleCheck, Clock, Warning } from '@element-plus/icons-vue'
 
 import { fetchHousehold, type Household } from '../api/chat'
@@ -14,13 +13,11 @@ interface Notice {
   time: string
   tone: 'danger' | 'warning' | 'info' | 'success'
   icon: typeof Bell
-  link: string
 }
 
 const SEEN_KEY = 'mealflow_notification_seen_v1'
 const INVENTORY_DELIVERY_KEY = 'mealflow_inventory_notification_delivery_v1'
 const DAY_MS = 24 * 60 * 60 * 1000
-const router = useRouter()
 const notices = ref<Notice[]>([])
 const seenIds = ref<string[]>([])
 const loading = ref(false)
@@ -62,6 +59,15 @@ function saveInventoryDelivery(value: Record<string, InventoryDeliveryState>) {
   localStorage.setItem(INVENTORY_DELIVERY_KEY, JSON.stringify(value))
 }
 
+function reconcileSeen(activeNotices: Notice[]) {
+  const activeIds = new Set(activeNotices.map((notice) => notice.id))
+  const next = seenIds.value.filter((id) => activeIds.has(id))
+  if (next.length !== seenIds.value.length) {
+    seenIds.value = next
+    saveSeen()
+  }
+}
+
 function dateLabel(value: string | null) {
   if (!value) return '未设置日期'
   return value
@@ -78,6 +84,7 @@ function daysUntil(value: string | null): number | null {
 function buildNotices(inventory: InventoryItem[], household: Household | null, procurement: ProcurementItem[]): Notice[] {
   const next: Notice[] = []
   const delivery = readInventoryDelivery()
+  const activeDeliveryKeys = new Set<string>()
   let deliveryChanged = false
   const now = Date.now()
   for (const item of inventory) {
@@ -86,6 +93,7 @@ function buildNotices(inventory: InventoryItem[], household: Household | null, p
 
     if (days < 0) {
       const key = `inventory:expired:${item.id}`
+      activeDeliveryKeys.add(key)
       const state = delivery[key]
       if (!state) {
         delivery[key] = { lastSentAt: now, noticeId: key }
@@ -98,12 +106,12 @@ function buildNotices(inventory: InventoryItem[], household: Household | null, p
         time: '冰箱库存',
         tone: 'danger',
         icon: Warning,
-        link: '/admin/inventory',
       })
       continue
     }
 
     const key = `inventory:expiring:${item.id}`
+    activeDeliveryKeys.add(key)
     const state = delivery[key]
     if (!state || now - state.lastSentAt >= DAY_MS) {
       delivery[key] = {
@@ -119,8 +127,13 @@ function buildNotices(inventory: InventoryItem[], household: Household | null, p
       time: '冰箱库存',
       tone: 'warning',
       icon: Warning,
-      link: '/admin/inventory',
     })
+  }
+  for (const key of Object.keys(delivery)) {
+    if (!activeDeliveryKeys.has(key)) {
+      delete delivery[key]
+      deliveryChanged = true
+    }
   }
   if (deliveryChanged) saveInventoryDelivery(delivery)
   for (const member of household?.members ?? []) {
@@ -132,7 +145,6 @@ function buildNotices(inventory: InventoryItem[], household: Household | null, p
         time: '人员信息',
         tone: restriction.type === 'allergy' ? 'danger' : 'warning',
         icon: restriction.type === 'allergy' ? Warning : Clock,
-        link: '/admin/members',
       })
     }
   }
@@ -146,7 +158,6 @@ function buildNotices(inventory: InventoryItem[], household: Household | null, p
       time: '人员信息',
       tone: 'info',
       icon: Clock,
-      link: '/admin/members',
     })
   }
   for (const item of procurement.filter((current) => !current.checked)) {
@@ -157,7 +168,6 @@ function buildNotices(inventory: InventoryItem[], household: Household | null, p
       time: '采购清单',
       tone: 'success',
       icon: CircleCheck,
-      link: '/admin/procurement',
     })
   }
   return next
@@ -171,11 +181,13 @@ async function refresh() {
       fetchHousehold(),
       fetchProcurement(),
     ])
-    notices.value = buildNotices(
+    const next = buildNotices(
       inventory.status === 'fulfilled' ? inventory.value : [],
       household.status === 'fulfilled' ? household.value : null,
       procurement.status === 'fulfilled' ? procurement.value : [],
     )
+    notices.value = next
+    reconcileSeen(next)
   } finally {
     loading.value = false
   }
@@ -186,8 +198,6 @@ function markSeen(notice: Notice) {
     seenIds.value.push(notice.id)
     saveSeen()
   }
-  popoverOpen.value = false
-  void router.push(notice.link)
 }
 
 function markAllSeen() {
@@ -203,12 +213,14 @@ onMounted(() => {
   loadSeen()
   void refresh()
   refreshTimer = setInterval(() => void refresh(), 30_000)
+  window.addEventListener('mealflow:inventory-updated', onDataUpdated)
   window.addEventListener('mealflow:procurement-updated', onDataUpdated)
   window.addEventListener('mealflow:procurement-generated', onDataUpdated)
 })
 
 onBeforeUnmount(() => {
   if (refreshTimer) clearInterval(refreshTimer)
+  window.removeEventListener('mealflow:inventory-updated', onDataUpdated)
   window.removeEventListener('mealflow:procurement-updated', onDataUpdated)
   window.removeEventListener('mealflow:procurement-generated', onDataUpdated)
 })
@@ -233,7 +245,7 @@ onBeforeUnmount(() => {
         </div>
         <div v-loading="loading" class="notification-list">
           <button
-            v-for="notice in notices"
+            v-for="notice in unreadNotices"
             :key="notice.id"
             class="notification-item"
             :class="[{ unread: !seenIds.includes(notice.id) }, notice.tone]"
@@ -248,7 +260,7 @@ onBeforeUnmount(() => {
             </span>
             <i v-if="!seenIds.includes(notice.id)" class="unread-dot"></i>
           </button>
-          <div v-if="!loading && !notices.length" class="notification-empty">
+          <div v-if="!loading && !unreadNotices.length" class="notification-empty">
             <el-icon><CircleCheck /></el-icon>
             <span>库存、人员和采购清单都很安心</span>
           </div>

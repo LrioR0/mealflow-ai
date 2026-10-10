@@ -19,7 +19,7 @@ from app.db.models import (
     User,
     WorkspaceMember,
 )
-from app.services.pantry import DEFAULT_PANTRY_STAPLE_KEYS, effective_pantry_keys
+from app.services.pantry import DEFAULT_PANTRY_STAPLE_KEYS, effective_pantry_keys, pantry_label
 from app.db.session import SessionLocal
 
 router = APIRouter(tags=["household"])
@@ -72,18 +72,52 @@ class HouseholdView(BaseModel):
     events: list[MemberEventView]
 
 
+class PantryItemView(BaseModel):
+    key: str
+    label: str
+    is_custom: bool
+
+
 class PantryConfigView(BaseModel):
     workspace_id: str
     use_defaults: bool
     disabled_default_keys: list[str]
     custom_keys: list[str]
     effective_keys: list[str]
+    effective_items: list[PantryItemView]
 
 
 class PantryConfigUpdateRequest(BaseModel):
     use_defaults: bool = True
     disabled_default_keys: list[str] = Field(default_factory=list)
     custom_keys: list[str] = Field(default_factory=list)
+
+
+def _pantry_config_view(
+    session: Session, workspace_id: str, config: HouseholdPantryConfig | None
+) -> PantryConfigView:
+    custom_keys = [] if config is None else config.custom_keys or []
+    effective_keys = effective_pantry_keys(session, workspace_id)
+    custom_set = set(custom_keys)
+    items = sorted(
+        (
+            PantryItemView(
+                key=key,
+                label=pantry_label(key),
+                is_custom=key in custom_set,
+            )
+            for key in effective_keys
+        ),
+        key=lambda item: (item.is_custom, item.label),
+    )
+    return PantryConfigView(
+        workspace_id=workspace_id,
+        use_defaults=True if config is None else config.use_defaults,
+        disabled_default_keys=[] if config is None else config.disabled_default_keys or [],
+        custom_keys=custom_keys,
+        effective_keys=sorted(effective_keys),
+        effective_items=items,
+    )
 
 
 class EventCreateRequest(BaseModel):
@@ -158,13 +192,7 @@ class RecipeDetailView(BaseModel):
 def get_pantry_config(workspace_id: str) -> PantryConfigView:
     with SessionLocal() as session:
         config = session.get(HouseholdPantryConfig, workspace_id)
-        return PantryConfigView(
-            workspace_id=workspace_id,
-            use_defaults=True if config is None else config.use_defaults,
-            disabled_default_keys=[] if config is None else config.disabled_default_keys or [],
-            custom_keys=[] if config is None else config.custom_keys or [],
-            effective_keys=sorted(effective_pantry_keys(session, workspace_id)),
-        )
+        return _pantry_config_view(session, workspace_id, config)
 
 
 @router.put("/household/pantry/{workspace_id}", response_model=PantryConfigView)
@@ -178,7 +206,7 @@ def update_pantry_config(workspace_id: str, payload: PantryConfigUpdateRequest) 
         config.disabled_default_keys = sorted(set(payload.disabled_default_keys) & set(DEFAULT_PANTRY_STAPLE_KEYS))
         config.custom_keys = sorted({item.strip() for item in payload.custom_keys if item.strip()})
         session.commit()
-        return PantryConfigView(workspace_id=workspace_id, use_defaults=config.use_defaults, disabled_default_keys=config.disabled_default_keys, custom_keys=config.custom_keys, effective_keys=sorted(effective_pantry_keys(session, workspace_id)))
+        return _pantry_config_view(session, workspace_id, config)
 
 
 def _default_tags(event_type: str, tags: list[str]) -> list[str]:
@@ -479,15 +507,16 @@ def update_member(user_id: str, payload: MemberUpdateRequest) -> HouseholdView:
         user = session.get(User, user_id)
         if user is None:
             raise HTTPException(status_code=404, detail="成员不存在")
-        if payload.display_name is not None:
+        fields = payload.model_fields_set
+        if "display_name" in fields and payload.display_name is not None:
             user.display_name = payload.display_name
-        if payload.gender is not None:
+        if "gender" in fields:
             user.gender = payload.gender
-        if payload.residency is not None:
+        if "residency" in fields and payload.residency is not None:
             user.residency = payload.residency
-        if payload.taboo is not None:
+        if "taboo" in fields:
             user.taboo = payload.taboo
-        if payload.note is not None:
+        if "note" in fields:
             user.note = payload.note
         session.commit()
         workspace_id = session.scalar(

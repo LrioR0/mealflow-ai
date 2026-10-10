@@ -29,6 +29,7 @@ interface IngredientSuggestion {
   key: string
   category: string
   default_unit: string
+  is_custom?: boolean
 }
 
 const form = ref({
@@ -61,7 +62,7 @@ function suggestIngredients(
   callback: (suggestions: IngredientSuggestion[]) => void,
 ) {
   const query = queryString.trim().toLowerCase()
-  const suggestions = ingredients.value
+  const suggestions: IngredientSuggestion[] = ingredients.value
     .filter((item) => !form.value.category || item.category === form.value.category)
     .filter((item) => !query || `${item.name}${item.key}`.toLowerCase().includes(query))
     .slice(0, 8)
@@ -71,14 +72,35 @@ function suggestIngredients(
       category: item.category,
       default_unit: item.default_unit,
     }))
+  const hasExactMatch = ingredients.value.some(
+    (item) => item.name.toLowerCase() === query || item.key.toLowerCase() === query,
+  )
+  if (queryString.trim() && !hasExactMatch) {
+    suggestions.push({
+      value: queryString.trim(),
+      key: '',
+      category: '',
+      default_unit: '',
+      is_custom: true,
+    })
+  }
   callback(suggestions)
 }
 
 function selectIngredient(item: IngredientSuggestion) {
   form.value.ingredient_name = item.value
+  if (item.is_custom) {
+    form.value.ingredient_key = ''
+    return
+  }
   form.value.ingredient_key = item.key
   form.value.category = item.category
   if (!editingItemId.value || !form.value.unit) form.value.unit = item.default_unit
+}
+
+function onIngredientInput(value: string) {
+  const selected = ingredients.value.find((item) => item.key === form.value.ingredient_key)
+  if (selected && selected.name !== value.trim()) form.value.ingredient_key = ''
 }
 
 function resetForm() {
@@ -196,8 +218,19 @@ async function refresh() {
 
 async function submit() {
   const matched = selectedIngredient.value
-  if (!matched) {
-    ElMessage.warning('请输入并选择一个已有食材')
+  const ingredientName = form.value.ingredient_name.trim()
+  const category = form.value.category.trim()
+  const unit = form.value.unit.trim()
+  if (!ingredientName) {
+    ElMessage.warning('请输入食材名称')
+    return
+  }
+  if (!matched && !category) {
+    ElMessage.warning('请选择自定义食材的类别')
+    return
+  }
+  if (!matched && !unit) {
+    ElMessage.warning('请填写自定义食材的单位')
     return
   }
   submitting.value = true
@@ -205,15 +238,17 @@ async function submit() {
     if (editingItemId.value) {
       const updated = await updateInventoryItem(editingItemId.value, {
         quantity: form.value.quantity,
-        unit: form.value.unit.trim() || matched.default_unit,
+        unit: unit || matched?.default_unit,
         expires_on: form.value.expires_on || null,
       })
       ElMessage.success(`已更新:${updated.ingredient_name} ${updated.quantity} ${updated.unit}`)
     } else {
       const created = await addInventoryItem({
-        ingredient_key: matched.key,
+        ingredient_key: matched?.key || null,
+        ingredient_name: matched ? null : ingredientName,
+        category: matched ? null : category,
         quantity: form.value.quantity,
-        unit: form.value.unit.trim() || matched.default_unit,
+        unit: unit || matched?.default_unit,
         expires_on: form.value.expires_on || null,
       })
       ElMessage.success(`已保存:${created.ingredient_name} ${created.quantity} ${created.unit}`)
@@ -221,6 +256,8 @@ async function submit() {
     resetForm()
     showAddDialog.value = false
     await refresh()
+    if (!matched) ingredients.value = await fetchIngredients()
+    window.dispatchEvent(new CustomEvent('mealflow:inventory-updated'))
   } finally {
     submitting.value = false
   }
@@ -239,6 +276,7 @@ async function remove(item: InventoryItem) {
   await deleteInventoryItem(item.id)
   ElMessage.success(`已删除:${item.ingredient_name}`)
   await refresh()
+  window.dispatchEvent(new CustomEvent('mealflow:inventory-updated'))
 }
 
 async function load() {
@@ -304,16 +342,17 @@ onMounted(load)
             placeholder="输入食材名称，例如：番茄"
             style="width: 100%"
             @select="selectIngredient"
+            @input="onIngredientInput"
             @clear="form.ingredient_key = ''"
           >
             <template #default="{ item }">
               <div class="ingredient-suggestion">
-                <span>{{ item.value }}</span>
-                <small>{{ item.category }} · {{ item.default_unit }}</small>
+                <span>{{ item.is_custom ? `创建“${item.value}”` : item.value }}</span>
+                <small>{{ item.is_custom ? '自定义食材' : `${item.category} · ${item.default_unit}` }}</small>
               </div>
             </template>
           </el-autocomplete>
-          <small class="field-hint">输入后请从联想结果中选择，确保食材能被 Agent 正确识别。</small>
+          <small class="field-hint">可选择已有食材；没有匹配项时可创建自定义食材。</small>
         </el-form-item>
         <div class="form-grid two">
           <el-form-item label="食材类别" required>

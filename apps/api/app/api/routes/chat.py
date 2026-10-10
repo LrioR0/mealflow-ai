@@ -63,8 +63,28 @@ async def chat_once(payload: ChatStreamRequest) -> dict:
 
 @router.get("/sessions")
 def list_sessions(workspace_id: str = "home-workspace") -> list[dict]:
-    """会话列表:最近更新倒序,供前端历史会话下拉。"""
+    """会话列表:最近更新倒序,供前端历史会话抽屉。"""
     return [item.model_dump() for item in chat_service.list_sessions(workspace_id)]
+
+
+@router.get("/sessions/count")
+def count_workspace_sessions(
+    workspace_id: str = "home-workspace",
+    exclude_session_id: str | None = None,
+) -> dict[str, int]:
+    """返回清空历史操作将影响的准确会话数量。"""
+    return {
+        "count": chat_service.count_workspace_sessions(workspace_id, exclude_session_id)
+    }
+
+
+@router.delete("/sessions")
+def delete_workspace_sessions(
+    workspace_id: str = "home-workspace",
+    exclude_session_id: str | None = None,
+) -> dict[str, int]:
+    """清空工作区历史会话；exclude_session_id 用于保留当前对话。"""
+    return chat_service.delete_workspace_sessions(workspace_id, exclude_session_id)
 
 
 @router.delete("/{session_id}")

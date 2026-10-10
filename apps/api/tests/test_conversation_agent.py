@@ -171,6 +171,30 @@ async def test_duplicate_tool_calls_reuse_result_without_spending_budget(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_procurement_suggestions_are_deduplicated_across_recipe_tools(monkeypatch) -> None:
+    provider = _ScriptedProvider([
+        {"role": "assistant", "tool_calls": [{"id": "detail", "type": "function", "function": {"name": "get_recipe_detail", "arguments": '{"recipe":"番茄炒蛋"}'}}]},
+        {"role": "assistant", "tool_calls": [{"id": "availability", "type": "function", "function": {"name": "check_recipe_availability", "arguments": '{"recipe":"番茄炒蛋"}'}}]},
+        {"role": "assistant", "content": "已整理好。"},
+    ])
+    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: _context())
+
+    turn = await run_conversation_agent(
+        provider=provider,
+        workspace_id="workspace",
+        site_id="kitchen",
+        meal_service_id="lunch",
+        diner_ids=None,
+        user_text="番茄炒蛋缺什么",
+        history=[],
+        max_steps=6,
+    )
+
+    assert turn is not None
+    assert [item["ingredient"] for item in turn.procurement_suggestions] == ["淀粉"]
+
+
+@pytest.mark.asyncio
 async def test_recommend_menu_returns_structured_menu(monkeypatch) -> None:
     provider = _ScriptedProvider([
         {"role": "assistant", "tool_calls": [{"id": "menu", "type": "function", "function": {"name": "recommend_menu", "arguments": '{"dish_count":2,"staple":"米饭"}'}}]},

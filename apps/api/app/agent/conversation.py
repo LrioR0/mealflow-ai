@@ -52,6 +52,13 @@ class ConversationTurn:
     procurement_suggestions: list[dict[str, Any]] = field(default_factory=list)
     menu_recommendation: dict[str, Any] | None = None
 
+
+def _suggestion_key(item: dict[str, Any]) -> str:
+    """同一菜谱的同一缺项只向用户展示一次。"""
+    source = str(item.get("source_id") or item.get("recipe_id") or "")
+    ingredient = str(item.get("ingredient_key") or item.get("ingredient") or "")
+    return f"{source}:{ingredient}"
+
 def _load_context(workspace_id: str, site_id: str, meal_service_id: str) -> PlanningContext:
     from app.db.session import SessionLocal
     with SessionLocal() as session:
@@ -154,7 +161,7 @@ def _tool_error(exc: Exception) -> tuple[str, str]:
 async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_id: str, site_id: str, meal_service_id: str, diner_ids: list[str] | None, user_text: str, history: list[dict[str, str]], max_steps: int) -> AsyncIterator[dict[str, Any]]:
     if provider is None: yield {"type": "fallback"}; return
     messages: list[dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}, *history, {"role": "user", "content": user_text}]
-    context: PlanningContext | None = None; traces: list[ToolTraceView] = []; results: list[dict[str, Any]] = []; suggestions: list[dict[str, Any]] = []; menu_recommendation: dict[str, Any] | None = None
+    context: PlanningContext | None = None; traces: list[ToolTraceView] = []; results: list[dict[str, Any]] = []; suggestions: dict[str, dict[str, Any]] = {}; menu_recommendation: dict[str, Any] | None = None
     limit = max(1, min(max_steps, 8)); actions = 0
     # 读取家庭上下文与深入菜谱查询各自有预算，避免重复读库存挤掉菜单细化。
     context_names = {"get_member_constraints", "get_inventory_summary", "get_preference_summary"}
@@ -164,7 +171,7 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
     while True:
         decision_rounds += 1
         if decision_rounds > limit + 1:
-            yield {"type": "final", "turn": ConversationTurn("我已复用本轮已读取的信息完成判断。请告诉我想优先调整哪一道菜。", traces, results, suggestions, menu_recommendation)}
+            yield {"type": "final", "turn": ConversationTurn("我已复用本轮已读取的信息完成判断。请告诉我想优先调整哪一道菜。", traces, results, list(suggestions.values()), menu_recommendation)}
             return
         yield {"type": "status", "step": "agent_decide", "label": "判断下一步", "state": "running"}
         try: response = await provider.chat_with_tools(messages=messages, tools=TOOL_DEFINITIONS)
@@ -173,7 +180,7 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
         calls = _calls(response)
         if not calls:
             text = str(response.get("content") or "").strip()
-            yield {"type": "final", "turn": ConversationTurn(text, traces, results, suggestions, menu_recommendation)} if text else {"type": "fallback"}; return
+            yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation)} if text else {"type": "fallback"}; return
         assistant = {"role": response.get("role") or "assistant", "content": response.get("content") or "", "tool_calls": calls}
         if response.get("reasoning_content"): assistant["reasoning_content"] = response["reasoning_content"]
         messages.append(assistant)
@@ -184,7 +191,6 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
             fingerprint = f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
             if fingerprint in tool_cache:
                 result, summary, new = tool_cache[fingerprint]
-                suggestions.extend(new)
                 done = _trace(name, "success", args, duration_ms=0, output_summary=f"已复用本轮结果：{summary}")
             elif actions >= limit or (name in context_names and context_actions >= context_budget) or (name not in context_names and recipe_actions >= recipe_budget):
                 budget_kind = "上下文读取" if name in context_names else "菜谱深入查询"
@@ -196,7 +202,10 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
                 else: recipe_actions += 1
                 try:
                     if context is None: context = _load_context(workspace_id, site_id, meal_service_id)
-                    result, summary, new = _run_tool(name, args, context, diner_ids); suggestions.extend(new); tool_cache[fingerprint] = (result, summary, new)
+                    result, summary, new = _run_tool(name, args, context, diner_ids)
+                    for item in new:
+                        suggestions.setdefault(_suggestion_key(item), item)
+                    tool_cache[fingerprint] = (result, summary, new)
                     if name == "recommend_menu": menu_recommendation = result
                     done = _trace(name, "success", args, duration_ms=max(1, round((time.perf_counter()-started)*1000)), output_summary=summary)
                 except Exception as exc:
@@ -208,9 +217,9 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
         if actions >= limit or (context_actions >= context_budget and recipe_actions >= recipe_budget):
             try:
                 text = (await provider.chat(messages=[*messages, {"role": "system", "content": "工具额度已用尽。请立即依据已有结果作答，不得继续调用工具。"}])).strip()
-                if text: yield {"type": "final", "turn": ConversationTurn(text, traces, results, suggestions, menu_recommendation)}; return
+                if text: yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation)}; return
             except Exception: pass
-            yield {"type": "final", "turn": ConversationTurn("我已完成本轮查询。为避免重复查询，请告诉我你想优先决定哪一点。", traces, results, suggestions, menu_recommendation)}; return
+            yield {"type": "final", "turn": ConversationTurn("我已完成本轮查询。为避免重复查询，请告诉我你想优先决定哪一点。", traces, results, list(suggestions.values()), menu_recommendation)}; return
 
 async def run_conversation_agent(**kwargs: Any) -> ConversationTurn | None:
     callback: Callable[[ToolTraceView], None] | None = kwargs.pop("on_tool", None)

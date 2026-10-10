@@ -85,7 +85,7 @@ function onMenuSelect(index: string) {
     </aside>
     <main class="admin-main">
       <header class="topbar">
-        <div v-if="conversationStarted" class="greeting">
+        <div class="greeting" :class="{ visible: conversationStarted }" aria-live="polite">
           <small>{{ dateLine }}</small>
           <h1>{{ greeting }}</h1>
         </div>
@@ -220,9 +220,29 @@ function onMenuSelect(index: string) {
   padding: 18px 22px 46px;
   background: #f6f5ef;
 }
-.topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; min-height: 40px; padding-right: 132px; }
+.topbar {
+  position: relative;
+  height: 40px;
+  min-height: 40px;
+  margin-bottom: 14px;
+  padding-right: 132px;
+}
+.greeting {
+  position: absolute;
+  inset: 0 auto auto 0;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.greeting.visible { visibility: visible; opacity: 1; }
 .greeting small { color: #8a9a94; letter-spacing: 0.04em; }
-.greeting h1 { margin: 2px 0 0; font-size: 22px; font-family: Georgia, 'Songti SC', serif; }
+.greeting h1 {
+  margin: 1px 0 0;
+  font-size: 21px;
+  line-height: 1.15;
+  font-family: Georgia, 'Songti SC', serif;
+}
 /* 账户入口固定在视口右上角:全系统唯一一份,不随内容与滚动移动 */
 .account-dock {
   position: fixed;

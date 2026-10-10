@@ -11,7 +11,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date
 from typing import AsyncIterator
 
 from sqlalchemy import select
@@ -2159,6 +2159,48 @@ def delete_session(session_id: str) -> bool:
         return True
 
 
+def delete_workspace_sessions(
+    workspace_id: str,
+    exclude_session_id: str | None = None,
+) -> dict[str, int]:
+    """原子清理工作区会话；可排除当前会话，且不影响其他业务数据。"""
+    with SessionLocal() as session:
+        target_query = session.query(AgentChatSession.id).filter(
+            AgentChatSession.workspace_id == workspace_id
+        )
+        if exclude_session_id:
+            target_query = target_query.filter(AgentChatSession.id != exclude_session_id)
+        target_ids = [row[0] for row in target_query.all()]
+        if not target_ids:
+            return {"deleted_sessions": 0, "deleted_messages": 0}
+
+        deleted_messages = session.query(AgentChatMessage).filter(
+            AgentChatMessage.session_id.in_(target_ids)
+        ).delete(synchronize_session=False)
+        deleted_sessions = session.query(AgentChatSession).filter(
+            AgentChatSession.id.in_(target_ids)
+        ).delete(synchronize_session=False)
+        session.commit()
+        return {
+            "deleted_sessions": deleted_sessions,
+            "deleted_messages": deleted_messages,
+        }
+
+
+def count_workspace_sessions(
+    workspace_id: str,
+    exclude_session_id: str | None = None,
+) -> int:
+    """统计可清理会话数，让前端确认文案与实际删除范围一致。"""
+    with SessionLocal() as session:
+        query = session.query(AgentChatSession).filter(
+            AgentChatSession.workspace_id == workspace_id
+        )
+        if exclude_session_id:
+            query = query.filter(AgentChatSession.id != exclude_session_id)
+        return query.count()
+
+
 def list_sessions(workspace_id: str, limit: int = 30) -> list[ChatSessionSummary]:
     """会话列表:按最近更新倒序,只回摘要不含消息体;空会话(无消息)不展示。"""
     with SessionLocal() as session:
@@ -2179,7 +2221,11 @@ def list_sessions(workspace_id: str, limit: int = 30) -> list[ChatSessionSummary
                 ChatSessionSummary(
                     session_id=row.id,
                     title=row.title,
-                    updated_at=row.updated_at.isoformat(),
+                    updated_at=(
+                        row.updated_at.replace(tzinfo=UTC)
+                        if row.updated_at.tzinfo is None
+                        else row.updated_at
+                    ).isoformat(),
                 )
             )
             if len(summaries) >= limit:

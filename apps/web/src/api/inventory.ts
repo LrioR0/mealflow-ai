@@ -21,7 +21,9 @@ export interface IngredientOption {
 }
 
 export interface InventoryCreateInput {
-  ingredient_key: string
+  ingredient_key?: string | null
+  ingredient_name?: string | null
+  category?: string | null
   quantity: number
   unit?: string | null
   expires_on?: string | null

@@ -46,6 +46,7 @@ export interface PantryConfig {
   disabled_default_keys: string[]
   custom_keys: string[]
   effective_keys: string[]
+  effective_items: Array<{ key: string; label: string; is_custom: boolean }>
 }
 
 export interface ChatStreamRequest {
@@ -83,12 +84,35 @@ export function fetchChatSessions(workspaceId = 'home-workspace'): Promise<ChatS
   return apiRequest(`/agent/chat/sessions?workspace_id=${encodeURIComponent(workspaceId)}`)
 }
 
+export function fetchChatSessionCount(
+  workspaceId = 'home-workspace',
+  excludeSessionId?: string | null,
+): Promise<{ count: number }> {
+  const query = new URLSearchParams({ workspace_id: workspaceId })
+  if (excludeSessionId) query.set('exclude_session_id', excludeSessionId)
+  return apiRequest(`/agent/chat/sessions/count?${query.toString()}`)
+}
+
 export function fetchChatSession(sessionId: string): Promise<ChatSessionView> {
   return apiRequest(`/agent/chat/${sessionId}`)
 }
 
 export function deleteChatSession(sessionId: string): Promise<{ deleted: boolean }> {
   return apiRequest(`/agent/chat/${sessionId}`, { method: 'DELETE' })
+}
+
+export interface DeleteChatSessionsResult {
+  deleted_sessions: number
+  deleted_messages: number
+}
+
+export function deleteChatSessions(
+  workspaceId = 'home-workspace',
+  excludeSessionId?: string | null,
+): Promise<DeleteChatSessionsResult> {
+  const query = new URLSearchParams({ workspace_id: workspaceId })
+  if (excludeSessionId) query.set('exclude_session_id', excludeSessionId)
+  return apiRequest(`/agent/chat/sessions?${query.toString()}`, { method: 'DELETE' })
 }
 
 export function fetchHousehold(): Promise<Household> {

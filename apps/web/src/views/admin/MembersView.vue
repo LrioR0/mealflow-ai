@@ -14,7 +14,16 @@ import {
   type MemberPayload,
   type RestrictionType,
 } from '../../api/members'
-import { fetchHousehold, fetchPantryConfig, updatePantryConfig, type Household, type HouseholdMember, type PantryConfig } from '../../api/chat'
+import {
+  fetchHousehold,
+  fetchPantryConfig,
+  updatePantryConfig,
+  type Household,
+  type HouseholdEvent,
+  type HouseholdMember,
+  type HouseholdRestriction,
+  type PantryConfig,
+} from '../../api/chat'
 import { fetchIngredients, type IngredientOption } from '../../api/inventory'
 
 defineOptions({ name: 'MembersView' })
@@ -52,6 +61,10 @@ const eventDraft = reactive({
 })
 const pendingRestrictions = ref<Array<{ type: RestrictionType; ingredient_key: string; name: string }>>([])
 const pendingEvents = ref<Array<{ event_type: string; constraint_tags: string[]; start: string; end: string; note: string }>>([])
+const existingRestrictions = ref<HouseholdRestriction[]>([])
+const existingEvents = ref<HouseholdEvent[]>([])
+const originalRestrictionIds = ref<string[]>([])
+const originalEventIds = ref<string[]>([])
 
 // 特殊事件类型 → 默认约束(与后端 EVENT_DEFAULT_TAGS 对齐)
 const EVENT_PRESETS: Array<{ type: string; tags: string[]; hint: string }> = [
@@ -120,10 +133,6 @@ const filteredMembers = computed(() => {
     )
 })
 
-const editingMember = computed<HouseholdMember | null>(
-  () => household.value?.members.find((member) => member.user_id === editingId.value) ?? null,
-)
-
 function memberEvents(userId: string) {
   return (household.value?.events ?? [])
     .filter((event) => event.user_id === userId)
@@ -149,6 +158,10 @@ function resetDrafts() {
   eventDraft.note = ''
   pendingRestrictions.value = []
   pendingEvents.value = []
+  existingRestrictions.value = []
+  existingEvents.value = []
+  originalRestrictionIds.value = []
+  originalEventIds.value = []
   editTab.value = 'profile'
 }
 
@@ -166,6 +179,7 @@ function openCreate() {
 }
 
 function openEdit(member: HouseholdMember) {
+  resetDrafts()
   editingId.value = member.user_id
   Object.assign(form, {
     display_name: member.display_name,
@@ -174,7 +188,13 @@ function openEdit(member: HouseholdMember) {
     taboo: member.taboo ?? '',
     note: member.note ?? '',
   })
-  resetDrafts()
+  existingRestrictions.value = member.restrictions.map((item) => ({ ...item }))
+  existingEvents.value = memberEvents(member.user_id).map((item) => ({
+    ...item,
+    constraint_tags: [...item.constraint_tags],
+  }))
+  originalRestrictionIds.value = existingRestrictions.value.map((item) => item.id)
+  originalEventIds.value = existingEvents.value.map((item) => item.id)
   dialogVisible.value = true
 }
 
@@ -189,7 +209,7 @@ async function stageRestriction() {
     return
   }
   const exists =
-    (editingMember.value?.restrictions ?? []).some(
+    existingRestrictions.value.some(
       (item) =>
         item.type === restrictionDraft.type &&
         item.ingredient_key === restrictionDraft.ingredient_key,
@@ -208,20 +228,13 @@ async function stageRestriction() {
     ingredient_key: restrictionDraft.ingredient_key,
     name: ingredientName(restrictionDraft.ingredient_key),
   }
-  // 新成员还没有 user_id,先暂存,保存成员后再落库
-  if (!editingId.value) {
-    pendingRestrictions.value.push(payload)
-    restrictionDraft.ingredient_key = ''
-    return
-  }
-  household.value = await createRestriction({ ...payload, user_id: editingId.value })
-  ElMessage.success(`已加入${restrictionLabel(payload.type)}:${payload.name}`)
+  pendingRestrictions.value.push(payload)
+  ElMessage.success(`已暂存${restrictionLabel(payload.type)}：${payload.name}，保存后生效`)
   restrictionDraft.ingredient_key = ''
 }
 
-async function removeRestriction(restrictionId: string) {
-  household.value = await deleteRestriction(restrictionId)
-  ElMessage.success('已移除该限制')
+function removeRestriction(restrictionId: string) {
+  existingRestrictions.value = existingRestrictions.value.filter((item) => item.id !== restrictionId)
 }
 
 async function stageEvent() {
@@ -236,25 +249,12 @@ async function stageEvent() {
     end: eventDraft.range[1],
     note: eventDraft.note,
   }
-  if (!editingId.value) {
-    pendingEvents.value.push(payload)
-    ElMessage.success('已暂存,保存成员后生效')
-    return
-  }
-  household.value = await createMemberEvent({
-    user_id: editingId.value,
-    event_type: payload.event_type,
-    constraint_tags: payload.constraint_tags,
-    start_date: payload.start,
-    end_date: payload.end,
-    note: payload.note || null,
-  })
-  ElMessage.success(`已记录「${payload.event_type}」,按日期自动生效/过期`)
+  pendingEvents.value.push(payload)
+  ElMessage.success(`已暂存「${payload.event_type}」，保存后生效`)
 }
 
-async function removeEvent(eventId: string) {
-  household.value = await deleteMemberEvent(eventId)
-  ElMessage.success('已删除事件')
+function removeEvent(eventId: string) {
+  existingEvents.value = existingEvents.value.filter((item) => item.id !== eventId)
 }
 
 function removePendingRestriction(index: number) {
@@ -279,35 +279,44 @@ async function submit() {
     note: form.note || null,
   }
   try {
+    let targetUserId = editingId.value
     if (editingId.value) {
       household.value = await updateMember(editingId.value, payload)
-      ElMessage.success('成员档案已更新')
     } else {
       household.value = await createMemberApi(payload)
       const created = household.value.members.find(
         (member) => member.display_name === payload.display_name,
       )
-      if (created) {
-        for (const item of pendingRestrictions.value) {
-          household.value = await createRestriction({
-            user_id: created.user_id,
-            type: item.type,
-            ingredient_key: item.ingredient_key,
-          })
-        }
-        for (const item of pendingEvents.value) {
-          household.value = await createMemberEvent({
-            user_id: created.user_id,
-            event_type: item.event_type,
-            constraint_tags: item.constraint_tags,
-            start_date: item.start,
-            end_date: item.end,
-            note: item.note || null,
-          })
-        }
-      }
-      ElMessage.success('成员已加入家庭档案')
+      targetUserId = created?.user_id ?? null
     }
+    if (targetUserId) {
+      const retainedRestrictionIds = new Set(existingRestrictions.value.map((item) => item.id))
+      for (const id of originalRestrictionIds.value) {
+        if (!retainedRestrictionIds.has(id)) household.value = await deleteRestriction(id)
+      }
+      for (const item of pendingRestrictions.value) {
+        household.value = await createRestriction({
+          user_id: targetUserId,
+          type: item.type,
+          ingredient_key: item.ingredient_key,
+        })
+      }
+      const retainedEventIds = new Set(existingEvents.value.map((item) => item.id))
+      for (const id of originalEventIds.value) {
+        if (!retainedEventIds.has(id)) household.value = await deleteMemberEvent(id)
+      }
+      for (const item of pendingEvents.value) {
+        household.value = await createMemberEvent({
+          user_id: targetUserId,
+          event_type: item.event_type,
+          constraint_tags: item.constraint_tags,
+          start_date: item.start,
+          end_date: item.end,
+          note: item.note || null,
+        })
+      }
+    }
+    ElMessage.success(editingId.value ? '成员档案已更新' : '成员已加入家庭档案')
     dialogVisible.value = false
   } finally {
     submitting.value = false
@@ -348,6 +357,15 @@ async function savePantry() {
   ElMessage.success('常备料设置已保存')
 }
 
+async function removeCustomPantry(key: string) {
+  if (!pantryConfig.value) return
+  pantryConfig.value = await updatePantryConfig({
+    ...pantryConfig.value,
+    custom_keys: pantryConfig.value.custom_keys.filter((item) => item !== key),
+  })
+  ElMessage.success(`已删除自定义常备料：${key}`)
+}
+
 onMounted(load)
 </script>
 
@@ -385,7 +403,18 @@ onMounted(load)
         <el-input v-model="pantryDraft" size="small" placeholder="新增自定义项，如：黄油、孜然" @keyup.enter="savePantry" />
         <el-button size="small" @click="savePantry">保存</el-button>
       </div>
-      <div class="pantry-tags"><el-tag v-for="key in pantryConfig.effective_keys" :key="key" size="small" effect="plain">{{ key }}</el-tag></div>
+      <div class="pantry-tags">
+        <el-tag
+          v-for="item in pantryConfig.effective_items"
+          :key="item.key"
+          size="small"
+          effect="plain"
+          :closable="item.is_custom"
+          @close="item.is_custom && removeCustomPantry(item.key)"
+        >
+          {{ item.label }}<small v-if="item.is_custom"> · 自定义</small>
+        </el-tag>
+      </div>
     </section>
 
     <div class="filter-bar">
@@ -487,6 +516,7 @@ onMounted(load)
       width="580px"
       class="member-dialog"
       destroy-on-close
+      @closed="resetDrafts"
     >
       <el-tabs v-model="editTab" class="member-tabs">
         <el-tab-pane label="基础档案" name="profile">
@@ -553,7 +583,7 @@ onMounted(load)
 
           <div class="tag-list">
             <el-tag
-              v-for="restriction in editingMember?.restrictions ?? []"
+              v-for="restriction in existingRestrictions"
               :key="restriction.id"
               :type="restriction.type === 'allergy' ? 'danger' : 'warning'"
               :effect="restriction.type === 'allergy' ? 'dark' : 'plain'"
@@ -573,7 +603,7 @@ onMounted(load)
               {{ item.type === 'allergy' ? '过敏' : '忌口' }}·{{ item.name }}(待保存)
             </el-tag>
             <p
-              v-if="!(editingMember?.restrictions ?? []).length && !pendingRestrictions.length"
+              v-if="!existingRestrictions.length && !pendingRestrictions.length"
               class="no-restriction"
             >
               还没有记录过敏或忌口
@@ -626,7 +656,7 @@ onMounted(load)
 
           <div class="event-history">
             <div
-              v-for="event in memberEvents(editingId ?? '')"
+              v-for="event in existingEvents"
               :key="event.id"
               class="event-line"
               :class="eventState(event)"
@@ -654,7 +684,7 @@ onMounted(load)
               <el-button :icon="Delete" size="small" circle text type="danger" @click="removePendingEvent(index)" />
             </div>
             <p
-              v-if="!memberEvents(editingId ?? '').length && !pendingEvents.length"
+              v-if="!existingEvents.length && !pendingEvents.length"
               class="no-restriction"
             >
               还没有特殊事件记录

@@ -2,6 +2,7 @@
 
 from datetime import date, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -56,6 +57,29 @@ def _get_ingredient(session: Session, key: str) -> Ingredient:
     return ingredient
 
 
+def _resolve_ingredient(session: Session, payload: InventoryCreate) -> Ingredient:
+    """解析已有食材，或为用户输入创建可被 Agent 识别的自定义食材。"""
+    if payload.ingredient_key:
+        return _get_ingredient(session, payload.ingredient_key)
+
+    name = payload.ingredient_name or ""
+    existing = session.scalar(select(Ingredient).where(Ingredient.name == name))
+    if existing is not None:
+        return existing
+
+    ingredient = Ingredient(
+        key=f"custom_{uuid4().hex}",
+        name=name,
+        category=payload.category or "其他",
+        default_unit=payload.unit or "份",
+        reference_price=None,
+        price_source="用户自定义食材，暂无参考价",
+    )
+    session.add(ingredient)
+    session.flush()
+    return ingredient
+
+
 def list_items(session: Session, workspace_id: str) -> list[InventoryItemView]:
     if session.get(Workspace, workspace_id) is None:
         raise WorkspaceNotFoundError(f"工作区 {workspace_id} 不存在")
@@ -72,7 +96,7 @@ def add_item(session: Session, workspace_id: str, payload: InventoryCreate) -> I
     """新增库存项；同一食材已存在时按数据字典语义更新为最新数量（upsert）。"""
     if session.get(Workspace, workspace_id) is None:
         raise WorkspaceNotFoundError(f"工作区 {workspace_id} 不存在")
-    ingredient = _get_ingredient(session, payload.ingredient_key)
+    ingredient = _resolve_ingredient(session, payload)
     unit = payload.unit or ingredient.default_unit
     if unit != ingredient.default_unit:
         raise UnitMismatchError(
@@ -101,15 +125,16 @@ def update_item(
     if item is None:
         raise ItemNotFoundError(f"库存项 {item_id} 不存在")
     ingredient = session.get(Ingredient, item.ingredient_id)
-    if payload.quantity is not None:
+    fields = payload.model_fields_set
+    if "quantity" in fields and payload.quantity is not None:
         item.quantity = payload.quantity
-    if payload.unit is not None:
+    if "unit" in fields and payload.unit is not None:
         if ingredient and payload.unit != ingredient.default_unit:
             raise UnitMismatchError(
                 f"单位 {payload.unit} 与食材默认单位 {ingredient.default_unit} 不一致，需人工确认"
             )
         item.unit = payload.unit
-    if payload.expires_on is not None:
+    if "expires_on" in fields:
         item.expires_on = payload.expires_on
     session.commit()
     return _to_view(session, item, ingredient)

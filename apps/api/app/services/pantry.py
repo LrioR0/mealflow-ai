@@ -11,11 +11,26 @@ from sqlalchemy.orm import Session
 from app.db.models import HouseholdPantryConfig
 
 
-DEFAULT_PANTRY_STAPLE_KEYS = frozenset({
-    "salt", "sugar", "oil", "soy_sauce", "dark_soy_sauce", "oyster_sauce",
-    "vinegar", "starch", "peppercorn", "scallion", "ginger", "garlic",
-    "cooking_wine", "pepper", "dried_chili", "doubanjiang",
-})
+DEFAULT_PANTRY_STAPLE_LABELS = {
+    "salt": "盐",
+    "sugar": "糖",
+    "oil": "食用油",
+    "soy_sauce": "生抽",
+    "dark_soy_sauce": "老抽",
+    "oyster_sauce": "蚝油",
+    "vinegar": "醋",
+    "starch": "淀粉",
+    "peppercorn": "花椒",
+    "scallion": "葱",
+    "ginger": "姜",
+    "garlic": "蒜",
+    "cooking_wine": "料酒",
+    "pepper": "胡椒",
+    "dried_chili": "干辣椒",
+    "doubanjiang": "豆瓣酱",
+}
+
+DEFAULT_PANTRY_STAPLE_KEYS = frozenset(DEFAULT_PANTRY_STAPLE_LABELS)
 
 
 def effective_pantry_keys(session: Session | None, workspace_id: str) -> set[str]:
@@ -27,3 +42,8 @@ def effective_pantry_keys(session: Session | None, workspace_id: str) -> set[str
     keys.update(config.custom_keys or [])
     keys.difference_update(config.disabled_default_keys or [])
     return keys
+
+
+def pantry_label(key: str) -> str:
+    """把规则层使用的稳定 key 转成人类可读的中文名称。"""
+    return DEFAULT_PANTRY_STAPLE_LABELS.get(key, key)

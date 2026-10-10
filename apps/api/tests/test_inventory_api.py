@@ -46,6 +46,18 @@ def test_add_update_delete_inventory_item() -> None:
         assert patched.status_code == 200
         assert patched.json()["is_expiring"] is True
 
+        cleared = client.patch(
+            f"/api/v1/inventory/{item_id}", json={"expires_on": None}
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["expires_on"] is None
+        assert cleared.json()["is_expiring"] is False
+        listed_after_clear = client.get(
+            "/api/v1/workspaces/home-workspace/inventory"
+        ).json()
+        cleared_item = next(item for item in listed_after_clear if item["id"] == item_id)
+        assert cleared_item["expires_on"] is None
+
         deleted = client.delete(f"/api/v1/inventory/{item_id}")
         assert deleted.status_code == 204
         assert client.get(f"/api/v1/inventory/{item_id}").status_code in (404, 405)
@@ -88,3 +100,35 @@ def test_expiring_window_is_two_days() -> None:
         )
         assert created.json()["is_expiring"] is True
         client.delete(f"/api/v1/inventory/{created.json()['id']}")
+
+
+def test_create_custom_ingredient_and_make_it_available_to_inventory() -> None:
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/workspaces/home-workspace/inventory",
+            json={
+                "ingredient_name": "测试牛排",
+                "category": "肉禽",
+                "quantity": 2,
+                "unit": "块",
+            },
+        )
+        assert created.status_code == 201
+        body = created.json()
+        assert body["ingredient_key"].startswith("custom_")
+        assert body["ingredient_name"] == "测试牛排"
+        assert body["category"] == "肉禽"
+        assert body["unit"] == "块"
+
+        options = client.get("/api/v1/ingredients").json()
+        assert any(item["key"] == body["ingredient_key"] for item in options)
+        client.delete(f"/api/v1/inventory/{body['id']}")
+
+
+def test_custom_ingredient_requires_name_category_and_unit() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/workspaces/home-workspace/inventory",
+            json={"ingredient_name": "测试缺字段", "quantity": 1},
+        )
+    assert response.status_code == 422
