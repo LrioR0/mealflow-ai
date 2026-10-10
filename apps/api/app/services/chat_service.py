@@ -21,6 +21,7 @@ from app.core.config import get_settings
 from app.db.models import AgentChatMessage, AgentChatSession, AgentRun, Ingredient
 from app.db.session import SessionLocal
 from app.llm.factory import build_llm_provider
+from app.llm.model_catalog import resolve_model_profile
 from app.schemas.agent import AgentRunView, MenuOption, PlanningConstraints
 from app.schemas.chat import (
     ChatMessageView,
@@ -162,10 +163,10 @@ def _fallback_route(text: str) -> str:
     return "general"
 
 
-async def _route_message(text: str) -> str:
+async def _route_message(text: str, model_id: str | None = None) -> str:
     """优先由模型判断;无模型或路由失败时使用后端保底判断。"""
     fallback = _fallback_route(text)
-    provider = build_llm_provider(get_settings())
+    provider = build_llm_provider(get_settings(), model_id=model_id)
     if provider is None:
         return fallback
     try:
@@ -1110,13 +1111,14 @@ class _DishTagFilter:
 
 async def _llm_stream_text(
     prompt_messages: list[dict],
+    model_id: str | None = None,
 ) -> AsyncIterator[tuple[str, str]]:
     """有云端模型时,流式产出 ("thinking"|"text", 增量)。
 
     失败时记录日志并产出 "__error__" 标记(调用方按约定忽略该 kind),
     随后由调用方回退规则文本,不再无声吞错。
     """
-    provider = build_llm_provider(get_settings())
+    provider = build_llm_provider(get_settings(), model_id=model_id)
     if provider is None:
         return
     try:
@@ -1231,7 +1233,8 @@ async def _handle_library_refusal(
             },
             *_recent_history_messages(session_id, current_user_message_id),
             {"role": "user", "content": user_text},
-        ]
+        ],
+        model_id=payload.model_id,
     ):
         if kind == "thinking" and delta:
             thinking_parts.append(delta)
@@ -1282,7 +1285,22 @@ async def _handle_library_refusal(
 
 
 async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
+    profile = resolve_model_profile(get_settings(), payload.model_id)
+    async for chunk in _stream_chat_impl(payload):
+        if chunk.startswith("event: done\n"):
+            data = json.loads(chunk.split("data: ", 1)[1].strip())
+            data["model_id"] = profile.id if profile else None
+            data["model_label"] = profile.label if profile else None
+            if data.get("provider") and profile:
+                data["provider"] = profile.provider
+            yield _sse("done", data)
+        else:
+            yield chunk
+
+
+async def _stream_chat_impl(payload: ChatStreamRequest) -> AsyncIterator[str]:
     settings = get_settings()
+    profile = resolve_model_profile(settings, payload.model_id)
     current_user_message_id: str | None = None
     # 开场立即直播第一步,消除"首字节前纯转圈"的黑盒窗口
     yield _status("session", "准备会话", "running")
@@ -1319,9 +1337,10 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
     # 首选受控工具循环：模型只可选择只读家庭工具，无法执行库存/餐单等写操作。
     # Provider 不可用或不支持 function calling 时返回 None，继续走下方既有规则分支。
     live_tool_traces = []
+    agent_text_streamed = False
     turn = None
     async for agent_event in stream_conversation_agent(
-        provider=build_llm_provider(settings),
+        provider=build_llm_provider(settings, model_id=payload.model_id),
         workspace_id=payload.workspace_id,
         site_id=payload.site_id,
         meal_service_id=payload.meal_service_id,
@@ -1342,6 +1361,12 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 state = "done" if trace.status == "success" else "error"
                 yield _sse("tool_call", trace.model_dump())
                 yield _status(trace.tool_name, trace.input_summary, state, trace.output_summary)
+        elif agent_event["type"] == "text_delta":
+            agent_text_streamed = True
+            yield _sse("text", {"delta": agent_event["delta"]})
+        elif agent_event["type"] == "text_reset":
+            agent_text_streamed = False
+            yield _sse("text_reset", {})
         elif agent_event["type"] == "final":
             turn = agent_event["turn"]
         elif agent_event["type"] == "fallback":
@@ -1353,7 +1378,8 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
             yield _sse("procurement_suggestions", {"items": turn.procurement_suggestions})
         if turn.menu_recommendation:
             yield _sse("menu_recommendation", turn.menu_recommendation)
-        yield _sse("text", {"delta": turn.text})
+        if not agent_text_streamed:
+            yield _sse("text", {"delta": turn.text})
         yield _status("compose_reply", "组织回答", "done")
         with SessionLocal() as session:
             message = AgentChatMessage(
@@ -1372,7 +1398,9 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 "session_id": session_id,
                 "message_id": message_id,
                 "needs_input": False,
-                "provider": settings.llm_provider,
+                "provider": profile.provider if profile else None,
+                "model_id": profile.id if profile else None,
+                "model_label": profile.label if profile else None,
                 "route": "conversation_agent",
                 "tool_calls": [trace.model_dump() for trace in live_tool_traces],
                 "procurement_suggestions": turn.procurement_suggestions,
@@ -1383,7 +1411,7 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
         return
 
     yield _status("route_request", "判断处理方式", "running")
-    route = await _route_message(user_text)
+    route = await _route_message(user_text, model_id=payload.model_id)
     if _fallback_route(user_text) == "kitchen_recipe" or (
         any(term in user_text for term in ("怎么做", "做法"))
         and not any(term in user_text for term in ("保存", "保鲜", "方案", "安排", "预算"))
@@ -1427,7 +1455,8 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 *_recent_history_messages(session_id, current_user_message_id),
                 {"role": "user", "content": user_text},
                 {"role": "system", "content": _DISH_TAG_REMINDER},
-            ]
+            ],
+            model_id=payload.model_id,
         ):
             if kind == "text" and delta:
                 safe = dish_filter.feed(delta)
@@ -1515,7 +1544,8 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                 *_recent_history_messages(session_id, current_user_message_id),
                 {"role": "user", "content": user_text},
                 {"role": "system", "content": _DISH_TAG_REMINDER},
-            ]
+            ],
+            model_id=payload.model_id,
         ):
             if kind == "text" and delta:
                 safe = dish_filter.feed(delta)
@@ -1979,7 +2009,8 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                     {"role": "system", "content": _generic_recipe_prompt(dish_name, context)},
                     *_recent_history_messages(session_id, current_user_message_id),
                     {"role": "user", "content": user_text},
-                ]
+                ],
+                model_id=payload.model_id,
             ):
                 if kind == "thinking" and delta:
                     thinking_parts.append(delta)
@@ -2052,7 +2083,8 @@ async def stream_chat(payload: ChatStreamRequest) -> AsyncIterator[str]:
                         {"role": "system", "content": _recipe_qa_prompt(recipe, context, diners)},
                         *_recent_history_messages(session_id, current_user_message_id),
                         {"role": "user", "content": user_text},
-                    ]
+                    ],
+                    model_id=payload.model_id,
                 ):
                     if kind == "thinking" and delta:
                         thinking_parts.append(delta)

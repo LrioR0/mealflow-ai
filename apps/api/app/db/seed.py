@@ -32,6 +32,7 @@ from app.db.models import (
     WorkspaceMember,
 )
 from app.db.session import SessionLocal
+from app.services.recipe_taxonomy import IngredientFact, classify_recipe
 
 RECIPE_SEED_PATH = Path(__file__).resolve().parents[4] / "data" / "seed" / "recipes.json"
 
@@ -326,6 +327,23 @@ def seed_demo_data() -> dict[str, int]:
             recipe.source_name = entry["source_name"]
             recipe.source_url = entry["source_url"] or None
             recipe.license_note = entry["license_note"]
+            facts = [
+                IngredientFact(
+                    key=item["key"],
+                    name=ingredients[item["key"]].name,
+                    category=ingredients[item["key"]].category,
+                    quantity=Decimal(str(item["quantity"])),
+                    unit=item["unit"],
+                    optional=bool(item.get("optional", False)),
+                )
+                for item in entry["ingredients"]
+            ]
+            classified = classify_recipe(entry["name"], entry.get("tags") or [], facts)
+            recipe.meal_role = classified.meal_role
+            recipe.staple_type = classified.staple_type
+            recipe.protein_sources = classified.protein_sources
+            recipe.vegetable_keys = classified.vegetable_keys
+            recipe.portion_confidence = classified.portion_confidence
             session.flush()
 
             session.query(RecipeIngredient).filter(

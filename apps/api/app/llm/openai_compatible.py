@@ -3,6 +3,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from app.llm.protocol_guard import normalize_model_message
 from app.llm.provider import LLMProvider
 
 
@@ -75,7 +76,12 @@ class OpenAICompatibleCloudProvider(LLMProvider):
             temperature=0.1,
         )
         message = response.choices[0].message
-        return message.model_dump(exclude_none=True)
+        allowed = {
+            str(tool.get("function", {}).get("name"))
+            for tool in tools
+            if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+        }
+        return normalize_model_message(message.model_dump(exclude_none=True), allowed)
 
     async def healthcheck(self) -> bool:
         try:

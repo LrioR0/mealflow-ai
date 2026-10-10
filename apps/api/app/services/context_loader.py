@@ -25,6 +25,7 @@ from app.db.models import (
     WorkspaceMember,
 )
 from app.services.pantry import effective_pantry_keys
+from app.services.recipe_taxonomy import IngredientFact, classify_recipe
 
 EXPIRING_WINDOW_DAYS = 2
 
@@ -57,6 +58,7 @@ class RecipeIngredientLine:
     quantity: Decimal
     unit: str
     optional: bool
+    category: str = ""
 
 
 @dataclass
@@ -72,6 +74,11 @@ class RecipeContext:
     allergens: list[str]
     steps: list[str] = field(default_factory=list)
     ingredients: list[RecipeIngredientLine] = field(default_factory=list)
+    meal_role: str = ""
+    staple_type: str = "无"
+    protein_sources: list[str] = field(default_factory=list)
+    vegetable_keys: list[str] = field(default_factory=list)
+    portion_confidence: str = "servings_only"
 
     @property
     def required_ingredient_keys(self) -> set[str]:
@@ -210,9 +217,38 @@ def load_planning_context(
                 quantity=link.quantity,
                 unit=link.unit,
                 optional=link.optional,
+                category=ingredient.category or "",
             )
         )
     for recipe in recipe_rows:
+        lines = ingredients_by_recipe.get(recipe.id, [])
+        if (recipe.meal_role or "").strip():
+            meal_role = recipe.meal_role
+            staple_type = recipe.staple_type or "无"
+            protein_sources = list(recipe.protein_sources or [])
+            vegetable_keys = list(recipe.vegetable_keys or [])
+            portion_confidence = recipe.portion_confidence or "servings_only"
+        else:
+            classified = classify_recipe(
+                recipe.name,
+                list(recipe.tags or []),
+                [
+                    IngredientFact(
+                        key=line.key,
+                        name=line.name,
+                        category=line.category,
+                        quantity=line.quantity,
+                        unit=line.unit,
+                        optional=line.optional,
+                    )
+                    for line in lines
+                ],
+            )
+            meal_role = classified.meal_role
+            staple_type = classified.staple_type
+            protein_sources = classified.protein_sources
+            vegetable_keys = classified.vegetable_keys
+            portion_confidence = classified.portion_confidence
         recipes.append(
             RecipeContext(
                 id=recipe.id,
@@ -225,7 +261,12 @@ def load_planning_context(
                 taste_tags=recipe.taste_tags or [],
                 allergens=recipe.allergens,
                 steps=recipe.steps or [],
-                ingredients=ingredients_by_recipe.get(recipe.id, []),
+                ingredients=lines,
+                meal_role=meal_role,
+                staple_type=staple_type,
+                protein_sources=protein_sources,
+                vegetable_keys=vegetable_keys,
+                portion_confidence=portion_confidence,
             )
         )
 

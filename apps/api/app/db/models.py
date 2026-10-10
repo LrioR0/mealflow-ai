@@ -175,6 +175,13 @@ class Recipe(TimestampMixin, Base):
     license_note: Mapped[str] = mapped_column(
         String(200), default="自制演示数据，仅用于演示，可再分发"
     )
+    meal_role: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    staple_type: Mapped[str] = mapped_column(String(16), default="无", server_default="无")
+    protein_sources: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]")
+    vegetable_keys: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]")
+    portion_confidence: Mapped[str] = mapped_column(
+        String(32), default="servings_only", server_default="servings_only"
+    )
 
 
 class RecipeIngredient(TimestampMixin, Base):

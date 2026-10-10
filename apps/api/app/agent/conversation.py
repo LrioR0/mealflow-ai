@@ -11,15 +11,20 @@ from typing import Any
 
 from sqlalchemy.exc import OperationalError
 
+from app.llm.protocol_guard import contains_protocol_leak, normalize_model_message
 from app.llm.provider import LLMProvider
 from app.schemas.agent import ToolTraceView
 from app.services.context_loader import PlanningContext, RecipeContext, load_planning_context
+from app.services.menu_composer import compose_menu, render_menu_reply
 
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """你是 MealFlow 的家庭厨房对话 Agent。你可以读取家庭限制、冰箱、本地菜谱和历史偏好。只能使用工具已返回的事实，绝不编造库存、限制或菜谱。
 如果用户肯定上一轮你提出的“帮你查某道菜/菜谱”建议，必须从会话上下文提取菜名并调用菜谱工具，不能重复提问。
-用户明确要求多道菜、几菜一汤、按冰箱配餐时，先读取必要的库存和限制，再调用 recommend_menu；它已包含逐菜可用性检查，不要再为同一需求反复检索。缺少非辅料主料不是拒答理由：仍给出完整做法，并把缺项作为可选采购建议；不要要求用户先补货。常备料默认可用，但过敏或忌口不能绕过。你不能写库存、创建采购单或发布餐单。使用简洁自然的简体中文。"""
+用户要求整餐、几菜一汤或按人数配餐时，自主判断还缺少哪些事实，再调用 recommend_menu。根据工具结果决定是否需要继续读取详情或补充查询；菜品组合、主食互斥和份量以 recommend_menu 的结果为准，你只能解释，不能改菜，也不能把汤面、炒饭和另一种主食拼在一起。
+不要输出工具协议、DSML、函数调用标记或 JSON 工具信封。读取菜谱只能使用 get_recipe_detail。缺少非辅料主料不是拒答理由：仍给出完整做法，并把缺项作为可选采购建议；不要要求用户先补货。常备料默认可用，但过敏或忌口不能绕过。你不能写库存、创建采购单或发布餐单。使用简洁自然的简体中文。"""
+
+_WRAP_UP_PROMPT = "工具额度已用尽。不要调用任何工具，不要输出 DSML、tool_calls、invoke 或 JSON 工具信封。只用自然语言根据已有结果回答。最终回答不消耗工具额度。"
 
 TOOL_META = {
     "get_member_constraints": ("检查用餐限制", "当前家庭成员的饮食限制"),
@@ -41,8 +46,23 @@ TOOL_DEFINITIONS = [
     _tool("get_recipe_detail", "按菜谱 ID 或名称读取完整食材、步骤和份量。", {"recipe": {"type": "string"}}, ["recipe"]),
     _tool("check_recipe_availability", "核对一道菜的主料库存、缺少主料、常备辅料和限制。", {"recipe": {"type": "string"}}, ["recipe"]),
     _tool("get_preference_summary", "读取已记录的菜品评分和偏好摘要。"),
-    _tool("recommend_menu", "根据库存、限制和偏好生成多菜餐食候选；用户提出几菜一汤、主食或多人配餐时使用。", {"dish_count": {"type": "integer", "minimum": 1, "maximum": 6}, "need_soup": {"type": "boolean"}, "staple": {"type": "string"}, "style": {"type": "string"}, "preferred_ingredients": {"type": "array", "items": {"type": "string"}}}),
+    _tool(
+        "recommend_menu",
+        "按人数、库存和限制生成整餐。dish_count 不含主食和单独的汤；四菜一汤传 dish_count=4 且 need_soup=true。不传 dish_count 时按人数使用默认荤素模板。",
+        {
+            "diners": {"type": "integer", "minimum": 1, "maximum": 12},
+            "dish_count": {"type": "integer", "minimum": 1, "maximum": 8},
+            "need_soup": {"type": "boolean"},
+            "staple": {"type": "string"},
+            "style": {"type": "string"},
+            "vegetarian": {"type": "boolean"},
+            "all_meat": {"type": "boolean"},
+            "preferred_ingredients": {"type": "array", "items": {"type": "string"}},
+        },
+    ),
 ]
+
+_ALLOWED_TOOLS = {tool["function"]["name"] for tool in TOOL_DEFINITIONS}
 
 @dataclass
 class ConversationTurn:
@@ -86,35 +106,58 @@ def _availability(recipe: RecipeContext, context: PlanningContext, diner_ids: li
     return {"recipe_id": recipe.id, "recipe_name": recipe.name, **groups, "can_cook_without_purchase": not groups["missing_main_ingredients"] and not groups["restricted_ingredients"]}, suggestions
 
 def _recommend_menu(args: dict[str, Any], context: PlanningContext, diner_ids: list[str] | None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """确定性候选排序；模型只决定何时请求和如何解释，不能绕过限制。"""
-    dish_count = max(1, min(int(args.get("dish_count") or 3), 6))
-    want_soup = bool(args.get("need_soup")); style = str(args.get("style") or "").strip().lower()
-    preferred = {str(item).lower() for item in args.get("preferred_ingredients") or [] if str(item).strip()}
-    rows: list[tuple[RecipeContext, dict[str, Any], list[dict[str, Any]]]] = []
-    for recipe in context.recipes:
-        availability, suggestions = _availability(recipe, context, diner_ids)
-        rows.append((recipe, availability, suggestions))
-    def rank(item: tuple[RecipeContext, dict[str, Any], list[dict[str, Any]]]) -> tuple[int, int, int, str]:
-        recipe, availability, _ = item
-        preferred_hit = sum(ingredient.name.lower() in preferred for ingredient in recipe.ingredients)
-        return (bool(availability["restricted_ingredients"]), len(availability["missing_main_ingredients"]), -preferred_hit, recipe.name)
-    rows.sort(key=rank)
-    if want_soup:
-        soups = [row for row in rows if "汤" in row[0].name]
-        nonsoups = [row for row in rows if row not in soups]
-        chosen = (soups[:1] + nonsoups)[:dish_count]
-    else:
-        chosen = rows[:dish_count]
-    menu_items, suggestions = [], []
-    for recipe, availability, missing in chosen:
-        if availability["restricted_ingredients"]: state = "restricted"
-        elif availability["missing_main_ingredients"]: state = "purchase_optional"
-        else: state = "ready"
-        menu_items.append({"recipe_id": recipe.id, "name": recipe.name, "duration_minutes": recipe.duration_minutes, "state": state, "used_inventory": [x["name"] for x in availability["available_main_ingredients"]], "pantry_staples": [x["name"] for x in availability["pantry_staples"]], "missing_main_ingredients": [x["name"] for x in availability["missing_main_ingredients"]], "restricted_ingredients": [x["name"] for x in availability["restricted_ingredients"]]})
-        suggestions.extend(missing)
-    unique_suggestions = {f"{x['source_id']}:{x['ingredient']}": x for x in suggestions}
-    result = {"dish_count": dish_count, "staple": str(args.get("staple") or ""), "style": style, "items": menu_items, "ready_count": sum(x["state"] == "ready" for x in menu_items), "purchase_optional_count": sum(x["state"] == "purchase_optional" for x in menu_items), "restricted_count": sum(x["state"] == "restricted" for x in menu_items), "estimated_parallel_minutes": max((x["duration_minutes"] for x in menu_items), default=0), "reason": "优先使用现有库存并避开已知限制"}
-    return result, list(unique_suggestions.values())
+    return compose_menu(args, context, diner_ids)
+
+
+def _safe_reply(text: str, menu: dict[str, Any] | None) -> str:
+    cleaned = (text or "").strip()
+    if cleaned and not contains_protocol_leak(cleaned):
+        return cleaned
+    if cleaned:
+        logger.warning("已拦截模型输出中的工具协议，未写入对话")
+    if menu:
+        return render_menu_reply(menu)
+    if cleaned:
+        return "我已根据已读取的信息整理好建议。请告诉我你想先确定哪一道菜。"
+    return ""
+
+
+async def _stream_final_reply(
+    provider: LLMProvider,
+    messages: list[dict[str, Any]],
+    fallback: str,
+    menu: dict[str, Any] | None,
+) -> AsyncIterator[dict[str, Any]]:
+    """最终文本独立生成；协议片段留在缓冲内，失败时撤回已发送文本。"""
+    text = _safe_reply(fallback, menu)
+    if not getattr(provider, "supports_stream", lambda: False)():
+        yield {"type": "reply_ready", "text": text}
+        return
+    sent_chars = 0
+    streamed_text = ""
+    try:
+        async for kind, delta in provider.chat_stream(messages=messages):
+            if kind != "text" or not delta:
+                continue
+            streamed_text += delta
+            if contains_protocol_leak(streamed_text):
+                raise ValueError("模型流中检测到工具协议")
+            safe_end = max(0, len(streamed_text) - 64)
+            # '<' 可能是工具协议开头；不提前发出尚未闭合的标记。
+            opening = streamed_text.rfind("<", 0, safe_end)
+            if opening >= sent_chars and ">" not in streamed_text[opening:]:
+                safe_end = opening
+            if safe_end > sent_chars:
+                yield {"type": "text_delta", "delta": streamed_text[sent_chars:safe_end]}
+                sent_chars = safe_end
+        if streamed_text:
+            text = _safe_reply(streamed_text, menu)
+            yield {"type": "text_delta", "delta": streamed_text[sent_chars:]}
+    except Exception:
+        logger.warning("最终回答流式调用失败或包含协议，使用已有结果")
+        if sent_chars:
+            yield {"type": "text_reset"}
+    yield {"type": "reply_ready", "text": text}
 
 def _run_tool(name: str, args: dict[str, Any], context: PlanningContext, diner_ids: list[str] | None) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
     if name == "get_member_constraints":
@@ -163,23 +206,32 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
     messages: list[dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}, *history, {"role": "user", "content": user_text}]
     context: PlanningContext | None = None; traces: list[ToolTraceView] = []; results: list[dict[str, Any]] = []; suggestions: dict[str, dict[str, Any]] = {}; menu_recommendation: dict[str, Any] | None = None
     limit = max(1, min(max_steps, 8)); actions = 0
-    # 读取家庭上下文与深入菜谱查询各自有预算，避免重复读库存挤掉菜单细化。
-    context_names = {"get_member_constraints", "get_inventory_summary", "get_preference_summary"}
-    context_budget = min(3, limit); recipe_budget = limit - context_budget
-    context_actions = 0; recipe_actions = 0; tool_cache: dict[str, tuple[dict[str, Any], str, list[dict[str, Any]]]] = {}
+    tool_cache: dict[str, tuple[dict[str, Any], str, list[dict[str, Any]]]] = {}
     decision_rounds = 0
     while True:
         decision_rounds += 1
         if decision_rounds > limit + 1:
-            yield {"type": "final", "turn": ConversationTurn("我已复用本轮已读取的信息完成判断。请告诉我想优先调整哪一道菜。", traces, results, list(suggestions.values()), menu_recommendation)}
+            text = _safe_reply("", menu_recommendation) or "我已复用本轮已读取的信息完成判断。请告诉我想优先调整哪一道菜。"
+            yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation)}
             return
         yield {"type": "status", "step": "agent_decide", "label": "判断下一步", "state": "running"}
         try: response = await provider.chat_with_tools(messages=messages, tools=TOOL_DEFINITIONS)
         except Exception: yield {"type": "fallback"}; return
+        response = normalize_model_message(response, _ALLOWED_TOOLS)
         yield {"type": "status", "step": "agent_decide", "label": "判断下一步", "state": "done", "detail": "已获得下一步决策"}
         calls = _calls(response)
         if not calls:
-            text = str(response.get("content") or "").strip()
+            text = _safe_reply(str(response.get("content") or ""), menu_recommendation)
+            final_messages = [*messages, {
+                "role": "system",
+                "content": "依据已有工具结果直接输出最终自然语言回答，不要调用工具或输出协议。保持用户要求、已选菜品与份量不变。",
+            }]
+            yield {"type": "status", "step": "compose_reply", "label": "正在组织回答", "state": "running"}
+            async for event in _stream_final_reply(provider, final_messages, text, menu_recommendation):
+                if event["type"] == "reply_ready":
+                    text = event["text"]
+                else:
+                    yield event
             yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation)} if text else {"type": "fallback"}; return
         assistant = {"role": response.get("role") or "assistant", "content": response.get("content") or "", "tool_calls": calls}
         if response.get("reasoning_content"): assistant["reasoning_content"] = response["reasoning_content"]
@@ -192,14 +244,11 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
             if fingerprint in tool_cache:
                 result, summary, new = tool_cache[fingerprint]
                 done = _trace(name, "success", args, duration_ms=0, output_summary=f"已复用本轮结果：{summary}")
-            elif actions >= limit or (name in context_names and context_actions >= context_budget) or (name not in context_names and recipe_actions >= recipe_budget):
-                budget_kind = "上下文读取" if name in context_names else "菜谱深入查询"
-                result = {"error": f"{budget_kind}额度已用尽，请依据已有结果作答"}; done = _trace(name, "error", args, output_summary=result["error"], error_code="tool_limit_reached")
+            elif actions >= limit:
+                result = {"error": "工具总额度已用尽，请依据已有结果作答"}; done = _trace(name, "error", args, output_summary=result["error"], error_code="tool_limit_reached")
             else:
                 yield {"type": "tool", "trace": _trace(name, "running", args, output_summary="正在读取")}
                 started = time.perf_counter(); actions += 1
-                if name in context_names: context_actions += 1
-                else: recipe_actions += 1
                 try:
                     if context is None: context = _load_context(workspace_id, site_id, meal_service_id)
                     result, summary, new = _run_tool(name, args, context, diner_ids)
@@ -214,12 +263,29 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
                     result = {"error": message}; done = _trace(name, "error", args, duration_ms=max(1, round((time.perf_counter()-started)*1000)), output_summary=message, error_code=error_code)
             traces.append(done); results.append({"tool_name": name, "status": done.status, "summary": done.output_summary}); yield {"type": "tool", "trace": done}
             messages.append({"role": "tool", "tool_call_id": str(call.get("id") or name), "content": json.dumps(result, ensure_ascii=False)})
-        if actions >= limit or (context_actions >= context_budget and recipe_actions >= recipe_budget):
+        if actions >= limit:
+            text = _safe_reply("", menu_recommendation) or "我已完成本轮查询。为避免重复查询，请告诉我你想优先决定哪一点。"
+            final_messages = [*messages, {"role": "system", "content": _WRAP_UP_PROMPT}]
+            yield {"type": "status", "step": "compose_reply", "label": "正在组织回答", "state": "running"}
+            if getattr(provider, "supports_stream", lambda: False)():
+                async for event in _stream_final_reply(provider, final_messages, text, menu_recommendation):
+                    if event["type"] == "reply_ready":
+                        text = event["text"]
+                    else:
+                        yield event
+                yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation)}
+                return
             try:
-                text = (await provider.chat(messages=[*messages, {"role": "system", "content": "工具额度已用尽。请立即依据已有结果作答，不得继续调用工具。"}])).strip()
-                if text: yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation)}; return
-            except Exception: pass
-            yield {"type": "final", "turn": ConversationTurn("我已完成本轮查询。为避免重复查询，请告诉我你想优先决定哪一点。", traces, results, list(suggestions.values()), menu_recommendation)}; return
+                raw = await provider.chat(messages=[*messages, {"role": "system", "content": _WRAP_UP_PROMPT}])
+                text = _safe_reply(str(raw or ""), menu_recommendation)
+                if text:
+                    yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation)}
+                    return
+            except Exception:
+                logger.warning("收束回答失败，改用已有菜单结果")
+            fallback = _safe_reply("", menu_recommendation) or "我已完成本轮查询。为避免重复查询，请告诉我你想优先决定哪一点。"
+            yield {"type": "final", "turn": ConversationTurn(fallback, traces, results, list(suggestions.values()), menu_recommendation)}
+            return
 
 async def run_conversation_agent(**kwargs: Any) -> ConversationTurn | None:
     callback: Callable[[ToolTraceView], None] | None = kwargs.pop("on_tool", None)

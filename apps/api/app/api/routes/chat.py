@@ -5,15 +5,24 @@ import json
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
+from app.core.config import get_settings
+from app.llm.model_catalog import list_model_profiles, resolve_model_profile
 from app.schemas.chat import ChatStreamRequest
 from app.services import chat_service
 
 router = APIRouter(prefix="/agent/chat", tags=["chat"])
 
 
+@router.get("/models")
+def list_chat_models() -> list[dict[str, object]]:
+    """返回前端可选择的模型，不返回任何 API Key。"""
+    return [profile.public_view() for profile in list_model_profiles(get_settings())]
+
+
 @router.post("/stream")
 async def stream_chat(payload: ChatStreamRequest) -> StreamingResponse:
     """SSE 流式对话:status(动态工具步骤) / thinking / text / candidates 交错产出 → done。"""
+    _validate_model(payload)
     return StreamingResponse(
         chat_service.stream_chat(payload),
         media_type="text/event-stream",
@@ -29,7 +38,15 @@ async def stream_chat(payload: ChatStreamRequest) -> StreamingResponse:
 @router.post("")
 async def chat_once(payload: ChatStreamRequest) -> dict:
     """非流式兼容:聚合同一条事件流,返回最终回复(测试与降级用)。"""
-    result: dict = {"session_id": None, "text": "", "plan": None, "questions": [], "tool_calls": [], "needs_input": False}
+    _validate_model(payload)
+    result: dict = {
+        "session_id": None,
+        "text": "",
+        "plan": None,
+        "questions": [],
+        "tool_calls": [],
+        "needs_input": False,
+    }
     buffer = ""
     async for chunk in chat_service.stream_chat(payload):
         buffer += chunk
@@ -47,8 +64,12 @@ async def chat_once(payload: ChatStreamRequest) -> dict:
             data = json.loads(data_raw)
             if event_name == "done":
                 result["session_id"] = data.get("session_id")
+                result["model_id"] = data.get("model_id")
+                result["model_label"] = data.get("model_label")
             elif event_name == "text":
                 result["text"] += data.get("delta", "")
+            elif event_name == "text_reset":
+                result["text"] = ""
             elif event_name == "plan":
                 result["plan"] = data
             elif event_name == "questions":
@@ -59,6 +80,16 @@ async def chat_once(payload: ChatStreamRequest) -> dict:
             elif event_name == "error":
                 result["error"] = data.get("message")
     return result
+
+
+def _validate_model(payload: ChatStreamRequest) -> None:
+    if payload.model_id is None:
+        return
+    profiles = list_model_profiles(get_settings())
+    if not any(item.id == payload.model_id for item in profiles):
+        raise HTTPException(status_code=400, detail="未知模型，请刷新模型列表")
+    if resolve_model_profile(get_settings(), payload.model_id) is None:
+        raise HTTPException(status_code=400, detail="该模型尚未配置，请选择可用模型")
 
 
 @router.get("/sessions")

@@ -40,13 +40,17 @@ def _context() -> PlanningContext:
 
 
 class _ScriptedProvider:
-    def __init__(self, responses: list[dict]):
+    def __init__(self, responses: list[dict], chat_text: str = ""):
         self.responses = responses
         self.calls: list[list[dict]] = []
+        self.chat_text = chat_text
 
     async def chat_with_tools(self, *, messages, tools):
         self.calls.append(messages)
         return self.responses.pop(0)
+
+    async def chat(self, *, messages):
+        return self.chat_text
 
 
 @pytest.mark.asyncio
@@ -194,15 +198,95 @@ async def test_procurement_suggestions_are_deduplicated_across_recipe_tools(monk
     assert [item["ingredient"] for item in turn.procurement_suggestions] == ["淀粉"]
 
 
+def _menu_context() -> PlanningContext:
+    def recipe(recipe_id: str, name: str, role: str, staple: str, sources: list[str], ingredients: list[RecipeIngredientLine]) -> RecipeContext:
+        return RecipeContext(
+            id=recipe_id, name=name, servings=2, duration_minutes=15, kcal_per_serving=100,
+            estimated_cost_cents=100, tags=[], taste_tags=[], allergens=[], ingredients=ingredients,
+            meal_role=role, staple_type=staple, protein_sources=sources, portion_confidence="complete",
+        )
+
+    base = _context()
+    base.recipes = [
+        recipe("p", "辣子鸡", "protein_dish", "无", ["鸡肉"], [RecipeIngredientLine(key="chicken", name="鸡肉", quantity=1, unit="份", optional=False)]),
+        recipe("v", "清炒时蔬", "vegetable_dish", "无", [], [RecipeIngredientLine(key="greens", name="青菜", quantity=1, unit="份", optional=False)]),
+        recipe("r", "大锅米饭", "staple_side", "米饭", [], [RecipeIngredientLine(key="rice", name="大米", quantity=1, unit="kg", optional=False)]),
+    ]
+    base.inventory = [
+        InventoryLine(key="chicken", name="鸡肉", quantity=1, unit="份", expires_on=None),
+        InventoryLine(key="greens", name="青菜", quantity=1, unit="份", expires_on=None),
+        InventoryLine(key="rice", name="大米", quantity=1, unit="kg", expires_on=None),
+    ]
+    return base
+
+
 @pytest.mark.asyncio
 async def test_recommend_menu_returns_structured_menu(monkeypatch) -> None:
     provider = _ScriptedProvider([
         {"role": "assistant", "tool_calls": [{"id": "menu", "type": "function", "function": {"name": "recommend_menu", "arguments": '{"dish_count":2,"staple":"米饭"}'}}]},
         {"role": "assistant", "content": "已为你整理菜单。"},
     ])
-    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: _context())
+    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: _menu_context())
     turn = await run_conversation_agent(provider=provider, workspace_id="workspace", site_id="kitchen", meal_service_id="lunch", diner_ids=None, user_text="两人两道菜配米饭", history=[], max_steps=6)
     assert turn is not None
     assert turn.menu_recommendation is not None
-    assert turn.menu_recommendation["staple"] == "米饭"
-    assert turn.menu_recommendation["items"][0]["name"] == "番茄炒蛋"
+    assert turn.menu_recommendation["staple"]["type"] == "米饭"
+    assert turn.menu_recommendation["staple"]["suggested_quantity"] == "生米约 160g"
+    assert turn.menu_recommendation["meal_structure"] == "1 荤 + 1 素 + 米饭"
+    assert {item["name"] for item in turn.menu_recommendation["items"]} == {"辣子鸡", "清炒时蔬"}
+
+
+@pytest.mark.asyncio
+async def test_dsml_content_is_not_shown_and_alias_is_executed(monkeypatch) -> None:
+    leaked = """<|DSML|tool_calls>
+<|DSML|invoke name="get_recipe_by_id">
+<|DSML|parameter name="recipe" string="true">番茄炒蛋</|DSML|parameter>
+</|DSML|invoke>
+</|DSML|tool_calls>"""
+    provider = _ScriptedProvider([
+        {"role": "assistant", "content": leaked},
+        {"role": "assistant", "content": "番茄炒蛋可以做。"},
+    ])
+    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: _context())
+    turn = await run_conversation_agent(provider=provider, workspace_id="workspace", site_id="kitchen", meal_service_id="lunch", diner_ids=None, user_text="看看番茄炒蛋", history=[], max_steps=6)
+    assert turn is not None
+    assert "DSML" not in turn.text
+    assert "可以做" in turn.text
+    assert [trace.tool_name for trace in turn.traces] == ["get_recipe_detail"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_protocol_is_not_executed_or_shown(monkeypatch) -> None:
+    leaked = '<|DSML|invoke name="delete_inventory"><|DSML|parameter name="id" string="true">1</|DSML|parameter></|DSML|invoke>'
+    provider = _ScriptedProvider([{"role": "assistant", "content": leaked}])
+    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: _context())
+    turn = await run_conversation_agent(provider=provider, workspace_id="workspace", site_id="kitchen", meal_service_id="lunch", diner_ids=None, user_text="清空冰箱", history=[], max_steps=4)
+    assert turn is not None
+    assert turn.traces == []
+    assert "DSML" not in turn.text
+    assert "delete_inventory" not in turn.text
+
+
+@pytest.mark.asyncio
+async def test_exhausted_budget_discards_protocol_and_uses_menu(monkeypatch) -> None:
+    def call(name: str, arguments: str = "{}") -> dict:
+        return {"role": "assistant", "tool_calls": [{"id": name, "type": "function", "function": {"name": name, "arguments": arguments}}]}
+
+    provider = _ScriptedProvider(
+        [
+            call("get_member_constraints"),
+            call("get_inventory_summary"),
+            call("get_preference_summary"),
+            call("recommend_menu"),
+            call("search_recipes", '{"query":"青菜"}'),
+            call("search_recipes", '{"query":"豆腐"}'),
+        ],
+        chat_text="<|DSML|tool_calls><|DSML|invoke name=\"get_recipe_by_id\"></|DSML|invoke>",
+    )
+    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: _menu_context())
+    turn = await run_conversation_agent(provider=provider, workspace_id="workspace", site_id="kitchen", meal_service_id="lunch", diner_ids=None, user_text="今晚吃什么", history=[], max_steps=6)
+    assert turn is not None
+    assert "DSML" not in turn.text
+    assert "辣子鸡" in turn.text
+    assert turn.menu_recommendation is not None
+    assert provider.chat_text not in turn.text
