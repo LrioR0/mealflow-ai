@@ -35,10 +35,11 @@ class Settings(BaseSettings):
     aitechflux_base_url: str = "https://aitechflux.com/v1"
     aitechflux_gpt_model: str = "gpt-6.1-sol"
     aitechflux_grok_model: str = "grok-4.7"
-    #智普模型
+    # 智谱模型：文本 Agent 与视觉理解分开配置，共用同一平台密钥。
     bigmodel_api_key: str = ""
     bigmodel_base_url: str = "https://open.bigmodel.cn/api/paas/v4/"
-    bigmodel_model: str = "glm-4.7-flash"
+    bigmodel_text_model: str = "glm-4.5-air"
+    bigmodel_vision_model: str = "glm-4.6v"
     # 仅用于对话 Agent 的只读工具循环；正式配餐图不受该值影响。
     agent_max_steps: int = 6
     kiosk_token_secret: str = "replace-in-real-environment"

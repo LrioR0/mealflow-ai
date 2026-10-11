@@ -20,6 +20,7 @@ class ModelProfile:
     supports_stream: bool = True
     is_default: bool = False
     is_free: bool = False
+    use_case: str = ""
 
     @property
     def enabled(self) -> bool:
@@ -36,6 +37,7 @@ class ModelProfile:
             "supports_stream": self.supports_stream,
             "default": self.is_default,
             "is_free": self.is_free,
+            "use_case": self.use_case,
             "reason": reason,
         }
 
@@ -43,15 +45,25 @@ class ModelProfile:
 def list_model_profiles(settings: Settings) -> list[ModelProfile]:
     return [
         ModelProfile(
-            id="bigmodel-glm-4.7-flash",
-            label="GLM-4.7-Flash",
+            id="bigmodel-glm-4.5-air",
+            label="GLM-4.5-Air",
             provider="bigmodel",
-            model=settings.bigmodel_model,
+            model=settings.bigmodel_text_model,
             base_url=settings.bigmodel_base_url,
             api_key=settings.bigmodel_api_key,
             api_style="chat_completions",
             is_default=True,
-            is_free=settings.bigmodel_model == "glm-4.7-flash",
+            use_case="默认文本 Agent｜菜单规划、结构化意图与工具调用",
+        ),
+        ModelProfile(
+            id="bigmodel-glm-4.6v",
+            label="GLM-4.6V",
+            provider="bigmodel",
+            model=settings.bigmodel_vision_model,
+            base_url=settings.bigmodel_base_url,
+            api_key=settings.bigmodel_api_key,
+            api_style="chat_completions",
+            use_case="视觉任务｜冰箱照片、食品标签、菜单截图与文件理解",
         ),
         ModelProfile(
             id="deepseek-v4-pro",
@@ -62,6 +74,7 @@ def list_model_profiles(settings: Settings) -> list[ModelProfile]:
             api_key=settings.llm_api_key,
             api_style=settings.llm_api_style,
             is_default=False,
+            use_case="通用文本｜复杂推理与对话备选",
         ),
         ModelProfile(
             id="aitechflux-gpt-6.1-sol",
@@ -71,6 +84,7 @@ def list_model_profiles(settings: Settings) -> list[ModelProfile]:
             base_url=settings.aitechflux_base_url,
             api_key=settings.aitechflux_api_key,
             api_style="chat_completions",
+            use_case="高质量文本 Agent｜复杂菜单规划与工具调用",
         ),
         ModelProfile(
             id="aitechflux-grok-4.7",
@@ -80,6 +94,7 @@ def list_model_profiles(settings: Settings) -> list[ModelProfile]:
             base_url=settings.aitechflux_base_url,
             api_key=settings.aitechflux_api_key,
             api_style="chat_completions",
+            use_case="通用文本｜对话与工具调用备选",
         ),
     ]
 

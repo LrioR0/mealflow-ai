@@ -9,6 +9,7 @@ import {
   createRestriction,
   deleteMember,
   deleteMemberEvent,
+  deleteFoodPreference,
   deleteRestriction,
   updateMember,
   type MemberPayload,
@@ -235,6 +236,15 @@ async function stageRestriction() {
 
 function removeRestriction(restrictionId: string) {
   existingRestrictions.value = existingRestrictions.value.filter((item) => item.id !== restrictionId)
+}
+
+async function removeFoodPreference(preferenceId: string) {
+  try {
+    household.value = await deleteFoodPreference(preferenceId)
+    ElMessage.success('长期菜品偏好已删除')
+  } catch {
+    ElMessage.error('删除长期菜品偏好失败')
+  }
 }
 
 async function stageEvent() {
@@ -479,6 +489,20 @@ onMounted(load)
             </el-tag>
           </div>
           <p v-else class="no-restriction">暂无过敏或忌口</p>
+
+          <div v-if="member.food_preferences?.length" class="restriction-tags food-preference-tags">
+            <el-tag
+              v-for="preference in member.food_preferences"
+              :key="preference.id"
+              type="info"
+              effect="plain"
+              size="small"
+              closable
+              @close="removeFoodPreference(preference.id)"
+            >
+              {{ preference.preference === 'dislike' ? '不喜欢' : '喜欢' }}·{{ preference.target_name }}
+            </el-tag>
+          </div>
 
           <!-- 第三层:临时特殊事件(带时间限定) -->
           <div v-if="memberEvents(member.user_id).length" class="event-block">

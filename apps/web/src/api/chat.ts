@@ -12,6 +12,16 @@ export interface HouseholdRestriction {
   ingredient_name: string
 }
 
+export interface FoodPreference {
+  id: string
+  user_id: string
+  target_type: 'dish' | 'ingredient'
+  target_key: string
+  target_name: string
+  preference: 'like' | 'dislike'
+  source: 'profile' | 'conversation'
+}
+
 export interface HouseholdMember {
   user_id: string
   display_name: string
@@ -21,6 +31,7 @@ export interface HouseholdMember {
   taboo: string | null
   note: string | null
   restrictions: HouseholdRestriction[]
+  food_preferences: FoodPreference[]
 }
 
 export interface HouseholdEvent {
@@ -68,6 +79,7 @@ export interface ChatModel {
   is_free: boolean
   supports_tools: boolean
   supports_stream: boolean
+  use_case: string
   reason: string | null
 }
 
@@ -157,6 +169,10 @@ export function createHouseholdEvent(payload: {
 
 export function deleteHouseholdEvent(eventId: string): Promise<void> {
   return apiRequest(`/household/events/${eventId}`, { method: 'DELETE' })
+}
+
+export function deleteFoodPreference(preferenceId: string): Promise<void> {
+  return apiRequest(`/household/preferences/${preferenceId}`, { method: 'DELETE' })
 }
 
 export interface RecipeDetail {

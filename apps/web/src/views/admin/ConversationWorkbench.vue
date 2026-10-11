@@ -13,6 +13,7 @@ import {
 
 import {
   createHouseholdEvent,
+  deleteFoodPreference,
   deleteChatSessions,
   deleteChatSession,
   fetchChatSession,
@@ -99,6 +100,22 @@ interface MenuItem {
   pantry_staples: string[]
   missing_main_ingredients: string[]
   restricted_ingredients: string[]
+  source?: 'local' | 'model_generated'
+  warnings?: string[]
+}
+
+interface PreferenceUpdateEvent {
+  status: 'saved' | 'skipped'
+  id?: string
+  target_name?: string
+  message: string
+  undone?: boolean
+}
+
+interface GeneratedRecipeEvent {
+  recipe_id: string
+  name: string
+  source: 'model_generated'
 }
 
 interface MenuStaple {
@@ -152,6 +169,8 @@ interface ChatBubble {
   menuRecommendation?: MenuRecommendation
   toolBudget?: { used: number; limit: number }
   thinkingOpen?: boolean
+  preferenceUpdates?: PreferenceUpdateEvent[]
+  generatedRecipes?: GeneratedRecipeEvent[]
 }
 
 const STEP_LABELS: Record<string, string> = {
@@ -238,6 +257,7 @@ function modelMonogram(model: ChatModel): string {
 
 function modelHint(model: ChatModel): string {
   if (!model.enabled) return '尚未配置连接'
+  if (model.use_case) return model.use_case
   if (model.is_free) return '官方免费模型 · 支持 Agent 工具调用'
   if (model.provider === 'aitechflux') return 'AITechFlux · 对话与工具调用'
   return '家庭厨房 · 日常推荐'
@@ -804,6 +824,18 @@ async function send(preset?: string) {
             assistant.steps.push({ step, label, state, detail })
           }
         }
+      } else if (event.event === 'preference_updated') {
+        const update = event.data as unknown as PreferenceUpdateEvent
+        assistant.preferenceUpdates ??= []
+        assistant.preferenceUpdates.push(update)
+        if (update.status === 'saved') ElMessage.success(update.message)
+        else ElMessage.warning(update.message)
+      } else if (event.event === 'recipe_generated') {
+        const recipe = event.data as unknown as GeneratedRecipeEvent
+        assistant.generatedRecipes ??= []
+        if (!assistant.generatedRecipes.some((item) => item.recipe_id === recipe.recipe_id)) {
+          assistant.generatedRecipes.push(recipe)
+        }
       } else if (event.event === 'text_reset') {
         assistant.content = ''
       } else if (event.event === 'text') {
@@ -889,6 +921,17 @@ async function addSuggestion(item: ProcurementSuggestion) {
   }
 }
 
+async function undoPreference(item: PreferenceUpdateEvent) {
+  if (!item.id || item.undone) return
+  try {
+    await deleteFoodPreference(item.id)
+    item.undone = true
+    ElMessage.success('已撤销长期偏好')
+  } catch {
+    ElMessage.error('撤销失败，请稍后重试')
+  }
+}
+
 // 停止生成:中断当前流,已输出的内容保留
 function stopGeneration() {
   currentAbort.value?.abort()
@@ -928,11 +971,11 @@ function stopGeneration() {
           <h2>{{ timeGreeting }}</h2>
           <p>把今天想吃什么交给我。人数、预算、冰箱库存和饮食限制，我会一起考虑，给你一套能直接开火的方案。</p>
           <div class="hero-chips">
-            <el-button size="small" round @click="ask('明天中午想吃辣子鸡,我们俩,预算 60 块')">
-              <span class="chip-icon">✦</span>明天中午想吃辣子鸡 · 2 人 · 60 元
+            <el-button size="small" round @click="ask('今晚我们两个人吃，帮我安排一荤一素')">
+              <span class="chip-icon">✦</span>两人晚餐 · 一荤一素
             </el-button>
-            <el-button size="small" round @click="ask('晚上吃点清淡的')">今晚吃点清淡的</el-button>
-            <el-button size="small" round @click="ask('看看冰箱里有什么适合今天吃的')">看看冰箱里有什么</el-button>
+            <el-button size="small" round @click="ask('我不喜欢吃拍黄瓜，帮我换一道素菜')">记住忌口并换一道菜</el-button>
+            <el-button size="small" round @click="ask('根据冰箱库存，优先用临期食材安排今晚的晚餐')">优先消耗临期食材</el-button>
           </div>
         </div>
 
@@ -989,6 +1032,12 @@ function stopGeneration() {
                 </ul>
               </div>
 
+              <div v-if="bubble.generatedRecipes?.length" class="generated-recipes" role="status">
+                <span v-for="recipe in bubble.generatedRecipes" :key="recipe.recipe_id">
+                  模型生成做法 · {{ recipe.name }}
+                </span>
+              </div>
+
               <section v-if="bubble.menuRecommendation" class="menu-recommendation-card">
                 <header>
                   <div>
@@ -997,19 +1046,19 @@ function stopGeneration() {
                   </div>
                   <small>约 {{ bubble.menuRecommendation.estimated_parallel_minutes }} 分钟</small>
                 </header>
-                <p>{{ bubble.menuRecommendation.balance_summary || bubble.menuRecommendation.reason }}</p>
-                <p v-for="note in bubble.menuRecommendation.relaxations || []" :key="note" class="menu-relaxation">{{ note }}</p>
                 <div v-for="group in menuSections(bubble.menuRecommendation)" :key="group.label" class="menu-group">
                   <h4>{{ group.label }}</h4>
                   <div class="menu-recommendation-items">
                     <article v-for="item in group.items" :key="item.recipe_id" :class="item.state">
                       <strong>{{ item.name }}</strong>
+                      <small v-if="item.source === 'model_generated'" class="generated-source">模型生成</small>
                       <small v-if="item.target_servings">{{ item.target_servings }} 人份</small>
                       <small v-if="item.state === 'ready'">可直接做</small>
                       <small v-else-if="item.state === 'purchase_optional'">可选采购：{{ item.missing_main_ingredients.join('、') }}</small>
                       <small v-else>限制：{{ item.restricted_ingredients.join('、') }}</small>
                       <em v-if="ingredientLine(item)">用量：{{ ingredientLine(item) }}</em>
                       <em v-if="item.used_inventory.length">用库存：{{ item.used_inventory.join('、') }}</em>
+                      <em v-for="warning in item.warnings || []" :key="warning" class="menu-warning">{{ warning }}</em>
                     </article>
                   </div>
                 </div>
@@ -1026,6 +1075,13 @@ function stopGeneration() {
                 </div>
                 <p v-if="bubble.menuRecommendation.portion_note" class="menu-portion-note">{{ bubble.menuRecommendation.portion_note }}</p>
               </section>
+
+              <div v-if="bubble.preferenceUpdates?.length" class="preference-updates">
+                <div v-for="item in bubble.preferenceUpdates" :key="item.id || item.message">
+                  <span>{{ item.undone ? '已撤销长期偏好' : item.message }}</span>
+                  <button v-if="item.status === 'saved' && !item.undone" type="button" @click="undoPreference(item)">撤销</button>
+                </div>
+              </div>
 
               <div v-if="bubble.procurementSuggestions?.length" class="procurement-suggestions">
                 <strong>缺少的主料（可选）</strong>
@@ -2001,6 +2057,13 @@ function stopGeneration() {
 .menu-recommendation-items article.purchase_optional small { color: #a16c24; }
 .menu-recommendation-items article.restricted small { color: #b4534b; }
 .menu-recommendation-items em { grid-column: 1 / -1; color: #85958f; font-size: 11.5px; font-style: normal; }
+.menu-recommendation-items .generated-source { color: #0f665b; font-weight: 700; }
+.menu-recommendation-items .menu-warning { color: #a16c24; }
+.preference-updates { margin: 8px 0; display: grid; gap: 5px; }
+.preference-updates > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 9px; border-radius: 8px; background: #eef7f3; color: #315d54; font-size: 12px; }
+.preference-updates button { border: 0; background: transparent; color: #0f665b; cursor: pointer; font-weight: 700; }
+.generated-recipes { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.generated-recipes span { padding: 5px 9px; border: 1px solid #bcded5; border-radius: 999px; background: #eff8f5; color: #0f665b; font-size: 12px; font-weight: 700; }
 .menu-group { margin-top: 8px; }
 .menu-group h4 { margin: 0 0 4px; color: #56726a; font-size: 12px; font-weight: 600; }
 .menu-relaxation, .menu-portion-note { margin: 4px 0 0; color: #85958f; font-size: 11.5px; }

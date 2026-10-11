@@ -10,7 +10,8 @@ def _settings() -> Settings:
         llm_api_key="test-default-key",
         llm_model="deepseek-v4-pro",
         bigmodel_api_key="test-bigmodel-key",
-        bigmodel_model="glm-4.7-flash",
+        bigmodel_text_model="glm-4.5-air",
+        bigmodel_vision_model="glm-4.6v",
         llm_base_url="https://api.deepseek.com",
         aitechflux_api_key="test-gateway-key",
     )
@@ -24,10 +25,13 @@ async def test_model_list_is_public_metadata_only(monkeypatch) -> None:
     ) as client:
         response = await client.get("/api/v1/agent/chat/models")
     assert response.status_code == 200
-    assert len(response.json()) == 4
+    assert len(response.json()) == 5
     assert response.json()[0]["default"] is True
-    assert response.json()[0]["is_free"] is True
-    assert response.json()[0]["label"] == "GLM-4.7-Flash"
+    assert response.json()[0]["is_free"] is False
+    assert response.json()[0]["label"] == "GLM-4.5-Air"
+    assert response.json()[0]["use_case"] == "默认文本 Agent｜菜单规划、结构化意图与工具调用"
+    assert response.json()[1]["label"] == "GLM-4.6V"
+    assert "视觉任务" in response.json()[1]["use_case"]
     assert "test-gateway-key" not in response.text
     assert "test-default-key" not in response.text
     assert "test-bigmodel-key" not in response.text

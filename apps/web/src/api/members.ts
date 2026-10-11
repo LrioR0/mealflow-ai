@@ -66,6 +66,11 @@ export async function deleteRestriction(restrictionId: string): Promise<Househol
   return fetchHousehold()
 }
 
+export async function deleteFoodPreference(preferenceId: string): Promise<Household> {
+  await apiRequest(`/household/preferences/${preferenceId}`, { method: 'DELETE' })
+  return fetchHousehold()
+}
+
 /** 特殊事件(带生效期):仅日期窗口内生效,不写入长期档案 */
 export function createMemberEvent(payload: MemberEventPayload): Promise<Household> {
   return apiRequest('/household/events', {
