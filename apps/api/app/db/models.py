@@ -3,7 +3,18 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -91,6 +102,30 @@ class DietaryRestriction(TimestampMixin, Base):
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     type: Mapped[str] = mapped_column(String(32))
     ingredient_key: Mapped[str] = mapped_column(String(80))
+
+
+class MemberFoodPreference(TimestampMixin, Base):
+    """成员长期食物偏好；菜品偏好与食材忌口分开建模。"""
+
+    __tablename__ = "member_food_preferences"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "user_id",
+            "target_type",
+            "target_key",
+            name="uq_member_food_preference_target",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    target_type: Mapped[str] = mapped_column(String(16))  # dish | ingredient
+    target_key: Mapped[str] = mapped_column(String(160))
+    target_name: Mapped[str] = mapped_column(String(160))
+    preference: Mapped[str] = mapped_column(String(16))  # like | dislike
+    source: Mapped[str] = mapped_column(String(24), default="profile")
 
 
 class MemberEvent(TimestampMixin, Base):

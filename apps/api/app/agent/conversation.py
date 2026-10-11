@@ -11,6 +11,12 @@ from typing import Any
 
 from sqlalchemy.exc import OperationalError
 
+from app.agent.intent import (
+    find_recipe,
+    generate_recipe,
+    parse_meal_intent,
+    upsert_member_preferences,
+)
 from app.llm.protocol_guard import contains_protocol_leak, normalize_model_message
 from app.llm.provider import LLMProvider
 from app.schemas.agent import ToolTraceView
@@ -33,6 +39,7 @@ TOOL_META = {
     "get_recipe_detail": ("读取菜谱做法", "查看“{recipe}”的食材和步骤"),
     "check_recipe_availability": ("核对食材可用性", "核对“{recipe}”的库存与缺项"),
     "get_preference_summary": ("读取家庭偏好", "历史评分与偏好"),
+    "upsert_member_preference": ("更新长期偏好", "写入已校验的家庭偏好"),
     "recommend_menu": ("生成本餐建议", "按库存与限制推荐 {dish_count} 道菜"),
 }
 
@@ -58,6 +65,10 @@ TOOL_DEFINITIONS = [
             "vegetarian": {"type": "boolean"},
             "all_meat": {"type": "boolean"},
             "preferred_ingredients": {"type": "array", "items": {"type": "string"}},
+            "required_dishes": {"type": "array", "items": {"type": "string"}},
+            "excluded_dishes": {"type": "array", "items": {"type": "string"}},
+            "excluded_ingredients": {"type": "array", "items": {"type": "string"}},
+            "budget_limit_cents": {"type": "integer", "minimum": 1},
         },
     ),
 ]
@@ -71,6 +82,7 @@ class ConversationTurn:
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     procurement_suggestions: list[dict[str, Any]] = field(default_factory=list)
     menu_recommendation: dict[str, Any] | None = None
+    preference_updates: list[dict[str, str]] = field(default_factory=list)
 
 
 def _suggestion_key(item: dict[str, Any]) -> str:
@@ -174,7 +186,7 @@ def _run_tool(name: str, args: dict[str, Any], context: PlanningContext, diner_i
     if name in {"get_recipe_detail", "check_recipe_availability"}:
         recipe = _recipe(context, str(args.get("recipe", ""))); availability, suggestions = _availability(recipe, context, diner_ids)
         if name == "check_recipe_availability": return availability, f"{recipe.name}：{len(availability['missing_main_ingredients'])} 项非辅料缺项，{len(availability['pantry_staples'])} 项常备料", suggestions
-        result = {"id": recipe.id, "name": recipe.name, "servings": recipe.servings, "duration_minutes": recipe.duration_minutes, "ingredients": [{"key": x.key, "name": x.name, "quantity": str(x.quantity), "unit": x.unit, "optional": x.optional, "is_pantry_staple": x.key in context.pantry_keys} for x in recipe.ingredients], "steps": recipe.steps, "availability": availability}
+        result = {"id": recipe.id, "name": recipe.name, "source": recipe.source, "servings": recipe.servings, "duration_minutes": recipe.duration_minutes, "ingredients": [{"key": x.key, "name": x.name, "quantity": str(x.quantity), "unit": x.unit, "optional": x.optional, "is_pantry_staple": x.key in context.pantry_keys} for x in recipe.ingredients], "steps": recipe.steps, "availability": availability}
         return result, f"已读取《{recipe.name}》的食材与 {len(recipe.steps)} 个步骤", suggestions
     if name == "get_preference_summary":
         rows = [{"dish": n, "rating": v.avg_rating, "count": v.sample_count, "tags": v.top_tags} for n, v in context.dish_feedback.items()]
@@ -203,16 +215,137 @@ def _tool_error(exc: Exception) -> tuple[str, str]:
 
 async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_id: str, site_id: str, meal_service_id: str, diner_ids: list[str] | None, user_text: str, history: list[dict[str, str]], max_steps: int) -> AsyncIterator[dict[str, Any]]:
     if provider is None: yield {"type": "fallback"}; return
-    messages: list[dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}, *history, {"role": "user", "content": user_text}]
     context: PlanningContext | None = None; traces: list[ToolTraceView] = []; results: list[dict[str, Any]] = []; suggestions: dict[str, dict[str, Any]] = {}; menu_recommendation: dict[str, Any] | None = None
+    preference_events: list[dict[str, str]] = []
+    intent = await parse_meal_intent(provider, user_text, history)
+    try:
+        context = _load_context(workspace_id, site_id, meal_service_id)
+    except Exception:
+        yield {"type": "fallback"}
+        return
+    if intent is not None and intent.preference_updates:
+        preference_args = {"updates": len(intent.preference_updates)}
+        started = time.perf_counter()
+        yield {
+            "type": "tool",
+            "trace": _trace(
+                "upsert_member_preference",
+                "running",
+                preference_args,
+                output_summary="正在写入",
+            ),
+        }
+        preference_events = upsert_member_preferences(
+            workspace_id, context, intent.preference_updates
+        )
+        saved_count = sum(event.get("status") == "saved" for event in preference_events)
+        preference_trace = _trace(
+            "upsert_member_preference",
+            "success" if saved_count else "error",
+            preference_args,
+            duration_ms=max(1, round((time.perf_counter() - started) * 1000)),
+            output_summary=(
+                f"已写入 {saved_count} 条长期偏好"
+                if saved_count
+                else preference_events[0]["message"] if preference_events else "没有可写入的明确偏好"
+            ),
+        )
+        traces.append(preference_trace)
+        yield {"type": "tool", "trace": preference_trace}
+        for event in preference_events:
+            yield {"type": "preference_updated", "data": event}
+        if any(event.get("status") == "saved" for event in preference_events):
+            context = _load_context(workspace_id, site_id, meal_service_id)
+    generated: list[RecipeContext] = []
+    if intent is not None:
+        diners = intent.diners or (len(diner_ids) if diner_ids else context.expected_diners)
+        for dish_name in intent.requested_dishes:
+            if find_recipe(context, dish_name) is not None:
+                continue
+            recipe = await generate_recipe(provider, dish_name, diners, context)
+            if recipe is not None:
+                context.recipes.append(recipe)
+                generated.append(recipe)
+                yield {
+                    "type": "recipe_generated",
+                    "data": {
+                        "recipe_id": recipe.id,
+                        "name": recipe.name,
+                        "source": recipe.source,
+                    },
+                }
+    intent_payload = intent.model_dump(mode="json") if intent is not None else {}
+    generated_payload = [
+        {
+            "name": recipe.name,
+            "source": recipe.source,
+            "servings": recipe.servings,
+            "duration_minutes": recipe.duration_minutes,
+            "ingredients": [
+                {"name": line.name, "quantity": str(line.quantity), "unit": line.unit}
+                for line in recipe.ingredients
+            ],
+            "steps": recipe.steps,
+        }
+        for recipe in generated
+    ]
+    authority = (
+        "以下结构化意图由编排器校验，必须遵守；不得遗漏必选菜、重新加入排除菜或虚构来源："
+        + json.dumps(intent_payload, ensure_ascii=False)
+    )
+    if generated_payload:
+        authority += (
+            "\n以下菜谱为模型生成而非本地库。回答中必须明确说明来源，不得称为本地菜谱："
+            + json.dumps(generated_payload, ensure_ascii=False)
+        )
+    messages: list[dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}, {"role": "system", "content": authority}, *history, {"role": "user", "content": user_text}]
     limit = max(1, min(max_steps, 8)); actions = 0
+    if intent is not None and intent.task_type in {"meal_plan", "preference_update"}:
+        menu_args: dict[str, Any] = {
+            "required_dishes": intent.requested_dishes,
+            "excluded_dishes": intent.excluded_dishes,
+            "preferred_ingredients": intent.preferred_ingredients,
+            "excluded_ingredients": intent.excluded_ingredients,
+            "style": intent.style,
+        }
+        if intent.diners is not None:
+            menu_args["diners"] = intent.diners
+        if intent.budget_limit_cents is not None:
+            menu_args["budget_limit_cents"] = intent.budget_limit_cents
+        running = _trace("recommend_menu", "running", menu_args, output_summary="正在生成")
+        yield {"type": "tool", "trace": running}
+        started = time.perf_counter()
+        result, summary, initial_suggestions = _run_tool(
+            "recommend_menu", menu_args, context, diner_ids
+        )
+        actions += 1
+        menu_recommendation = result
+        for item in initial_suggestions:
+            suggestions.setdefault(_suggestion_key(item), item)
+        done = _trace(
+            "recommend_menu",
+            "success",
+            menu_args,
+            duration_ms=max(1, round((time.perf_counter() - started) * 1000)),
+            output_summary=summary,
+        )
+        traces.append(done)
+        results.append({"tool_name": "recommend_menu", "status": "success", "summary": summary})
+        yield {"type": "tool", "trace": done}
+        messages.append(
+            {
+                "role": "system",
+                "content": "这是确定性菜单结果，只能解释不能改菜："
+                + json.dumps(result, ensure_ascii=False),
+            }
+        )
     tool_cache: dict[str, tuple[dict[str, Any], str, list[dict[str, Any]]]] = {}
     decision_rounds = 0
     while True:
         decision_rounds += 1
         if decision_rounds > limit + 1:
             text = _safe_reply("", menu_recommendation) or "我已复用本轮已读取的信息完成判断。请告诉我想优先调整哪一道菜。"
-            yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation)}
+            yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation, preference_events)}
             return
         yield {"type": "status", "step": "agent_decide", "label": "判断下一步", "state": "running"}
         try: response = await provider.chat_with_tools(messages=messages, tools=TOOL_DEFINITIONS)
@@ -232,7 +365,7 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
                     text = event["text"]
                 else:
                     yield event
-            yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation)} if text else {"type": "fallback"}; return
+            yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation, preference_events)} if text else {"type": "fallback"}; return
         assistant = {"role": response.get("role") or "assistant", "content": response.get("content") or "", "tool_calls": calls}
         if response.get("reasoning_content"): assistant["reasoning_content"] = response["reasoning_content"]
         messages.append(assistant)
@@ -240,6 +373,17 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
             fn = call["function"]; name = str(fn.get("name") or "unknown")
             try: args = json.loads(fn.get("arguments") or "{}"); assert isinstance(args, dict)
             except Exception: args = {}
+            if name == "recommend_menu" and intent is not None:
+                if intent.diners is not None:
+                    args["diners"] = intent.diners
+                if intent.budget_limit_cents is not None:
+                    args["budget_limit_cents"] = intent.budget_limit_cents
+                args["required_dishes"] = intent.requested_dishes
+                args["excluded_dishes"] = intent.excluded_dishes
+                args["preferred_ingredients"] = intent.preferred_ingredients
+                args["excluded_ingredients"] = intent.excluded_ingredients
+                if intent.style:
+                    args["style"] = intent.style
             fingerprint = f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
             if fingerprint in tool_cache:
                 result, summary, new = tool_cache[fingerprint]
@@ -250,7 +394,6 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
                 yield {"type": "tool", "trace": _trace(name, "running", args, output_summary="正在读取")}
                 started = time.perf_counter(); actions += 1
                 try:
-                    if context is None: context = _load_context(workspace_id, site_id, meal_service_id)
                     result, summary, new = _run_tool(name, args, context, diner_ids)
                     for item in new:
                         suggestions.setdefault(_suggestion_key(item), item)
@@ -273,18 +416,18 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
                         text = event["text"]
                     else:
                         yield event
-                yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation)}
+                yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation, preference_events)}
                 return
             try:
                 raw = await provider.chat(messages=[*messages, {"role": "system", "content": _WRAP_UP_PROMPT}])
                 text = _safe_reply(str(raw or ""), menu_recommendation)
                 if text:
-                    yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation)}
+                    yield {"type": "final", "turn": ConversationTurn(text, traces, results, list(suggestions.values()), menu_recommendation, preference_events)}
                     return
             except Exception:
                 logger.warning("收束回答失败，改用已有菜单结果")
             fallback = _safe_reply("", menu_recommendation) or "我已完成本轮查询。为避免重复查询，请告诉我你想优先决定哪一点。"
-            yield {"type": "final", "turn": ConversationTurn(fallback, traces, results, list(suggestions.values()), menu_recommendation)}
+            yield {"type": "final", "turn": ConversationTurn(fallback, traces, results, list(suggestions.values()), menu_recommendation, preference_events)}
             return
 
 async def run_conversation_agent(**kwargs: Any) -> ConversationTurn | None:

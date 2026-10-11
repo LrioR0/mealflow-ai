@@ -17,6 +17,7 @@ from app.db.models import (
     InventoryItem,
     MealService,
     MemberEvent,
+    MemberFoodPreference,
     Recipe,
     RecipeIngredient,
     Site,
@@ -79,6 +80,7 @@ class RecipeContext:
     protein_sources: list[str] = field(default_factory=list)
     vegetable_keys: list[str] = field(default_factory=list)
     portion_confidence: str = "servings_only"
+    source: str = "local"
 
     @property
     def required_ingredient_keys(self) -> set[str]:
@@ -91,6 +93,15 @@ class MemberProfile:
 
     user_id: str
     display_name: str
+
+
+@dataclass
+class FoodPreferenceContext:
+    user_id: str
+    target_type: str
+    target_key: str
+    target_name: str
+    preference: str
 
 
 @dataclass
@@ -125,6 +136,7 @@ class PlanningContext:
     restriction_types: dict[str, str] = field(default_factory=dict)
     dish_feedback: dict[str, "DishFeedbackStats"] = field(default_factory=dict)
     pantry_keys: set[str] = field(default_factory=set)
+    food_preferences: list[FoodPreferenceContext] = field(default_factory=list)
 
     def expiring_keys(self, today: date) -> set[str]:
         return {line.key for line in self.inventory if line.is_expiring(today)}
@@ -323,6 +335,10 @@ def load_planning_context(
         )
         _ = prefer_tags  # 预留:宜XX作为加分项进入评分
 
+    preference_rows = session.scalars(
+        select(MemberFoodPreference).where(MemberFoodPreference.workspace_id == workspace.id)
+    ).all()
+
     return PlanningContext(
         workspace_id=workspace.id,
         workspace_name=workspace.name,
@@ -339,4 +355,14 @@ def load_planning_context(
         excluded_keys=excluded_keys,
         restriction_types=restriction_types,
         pantry_keys=effective_pantry_keys(session, workspace.id),
+        food_preferences=[
+            FoodPreferenceContext(
+                user_id=item.user_id,
+                target_type=item.target_type,
+                target_key=item.target_key,
+                target_name=item.target_name,
+                preference=item.preference,
+            )
+            for item in preference_rows
+        ],
     )

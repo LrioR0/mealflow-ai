@@ -1,9 +1,18 @@
+import json
 from datetime import date
 
 import pytest
+from sqlalchemy import select
 
 from app.agent.conversation import run_conversation_agent, stream_conversation_agent
-from app.services.context_loader import InventoryLine, PlanningContext, RecipeContext, RecipeIngredientLine
+from app.db.models import MemberFoodPreference
+from app.db.session import SessionLocal
+from app.services.context_loader import (
+    InventoryLine,
+    PlanningContext,
+    RecipeContext,
+    RecipeIngredientLine,
+)
 
 
 def _context() -> PlanningContext:
@@ -51,6 +60,24 @@ class _ScriptedProvider:
 
     async def chat(self, *, messages):
         return self.chat_text
+
+
+class _IntentProvider(_ScriptedProvider):
+    def __init__(self, intent: dict, responses: list[dict]):
+        super().__init__(responses)
+        self.intent = intent
+
+    async def chat(self, *, messages):
+        return json.dumps(self.intent, ensure_ascii=False)
+
+
+class _QueuedChatProvider(_ScriptedProvider):
+    def __init__(self, chat_responses: list[dict], tool_responses: list[dict]):
+        super().__init__(tool_responses)
+        self.chat_responses = chat_responses
+
+    async def chat(self, *, messages):
+        return json.dumps(self.chat_responses.pop(0), ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -234,6 +261,155 @@ async def test_recommend_menu_returns_structured_menu(monkeypatch) -> None:
     assert turn.menu_recommendation["staple"]["suggested_quantity"] == "生米约 160g"
     assert turn.menu_recommendation["meal_structure"] == "1 荤 + 1 素 + 米饭"
     assert {item["name"] for item in turn.menu_recommendation["items"]} == {"辣子鸡", "清炒时蔬"}
+
+
+@pytest.mark.asyncio
+async def test_structured_intent_locks_named_dish_diners_and_budget(monkeypatch) -> None:
+    provider = _IntentProvider(
+        {
+            "task_type": "meal_plan",
+            "diners": 2,
+            "budget_limit_cents": 6000,
+            "requested_dishes": ["辣子鸡"],
+            "excluded_dishes": [],
+            "preferred_ingredients": [],
+            "excluded_ingredients": [],
+            "style": "辣",
+            "preference_updates": [],
+        },
+        [{"role": "assistant", "content": "已经按你的要求安排好了。"}],
+    )
+    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: _menu_context())
+
+    turn = await run_conversation_agent(
+        provider=provider,
+        workspace_id="workspace",
+        site_id="kitchen",
+        meal_service_id="lunch",
+        diner_ids=None,
+        user_text="明天中午想吃辣子鸡，我们俩，预算 60 元",
+        history=[],
+        max_steps=6,
+    )
+
+    assert turn is not None
+    assert turn.menu_recommendation is not None
+    assert turn.menu_recommendation["diners"] == 2
+    assert "辣子鸡" in {item["name"] for item in turn.menu_recommendation["items"]}
+    snapshot = turn.menu_recommendation["constraint_snapshot"]
+    assert snapshot["required_dishes"] == ["辣子鸡"]
+    assert snapshot["budget_limit_cents"] == 6000
+    assert [trace.tool_name for trace in turn.traces].count("recommend_menu") == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_dislike_is_persisted_and_applied_to_recomputed_menu() -> None:
+    provider = _IntentProvider(
+        {
+            "task_type": "preference_update",
+            "diners": 2,
+            "budget_limit_cents": None,
+            "requested_dishes": [],
+            "excluded_dishes": ["拍黄瓜"],
+            "preferred_ingredients": [],
+            "excluded_ingredients": [],
+            "style": "",
+            "preference_updates": [
+                {
+                    "target_type": "dish",
+                    "target_name": "拍黄瓜",
+                    "preference": "dislike",
+                    "explicit": True,
+                }
+            ],
+        },
+        [{"role": "assistant", "content": "已记住，并重新安排了菜单。"}],
+    )
+
+    turn = await run_conversation_agent(
+        provider=provider,
+        workspace_id="home-workspace",
+        site_id="home-kitchen",
+        meal_service_id="home-lunch",
+        diner_ids=["home-me", "home-partner"],
+        user_text="我不喜欢吃拍黄瓜",
+        history=[],
+        max_steps=6,
+    )
+
+    assert turn is not None
+    assert turn.preference_updates[0]["status"] == "saved"
+    assert "upsert_member_preference" in [trace.tool_name for trace in turn.traces]
+    assert turn.menu_recommendation is not None
+    assert all(item["name"] != "拍黄瓜" for item in turn.menu_recommendation["items"])
+    assert "拍黄瓜" in turn.menu_recommendation["constraint_snapshot"]["excluded_dishes"]
+    with SessionLocal() as session:
+        saved = session.scalar(
+            select(MemberFoodPreference).where(
+                MemberFoodPreference.workspace_id == "home-workspace",
+                MemberFoodPreference.user_id == "home-me",
+                MemberFoodPreference.target_name == "拍黄瓜",
+            )
+        )
+        assert saved is not None
+        assert saved.preference == "dislike"
+
+
+@pytest.mark.asyncio
+async def test_local_miss_generates_ephemeral_recipe_and_uses_it_in_menu(monkeypatch) -> None:
+    provider = _QueuedChatProvider(
+        [
+            {
+                "task_type": "meal_plan",
+                "diners": 2,
+                "budget_limit_cents": 5000,
+                "requested_dishes": ["星河豆腐"],
+                "excluded_dishes": [],
+                "preferred_ingredients": [],
+                "excluded_ingredients": [],
+                "style": "家常",
+                "preference_updates": [],
+            },
+            {
+                "name": "星河豆腐",
+                "servings": 2,
+                "duration_minutes": 20,
+                "ingredients": [
+                    {"name": "豆腐", "quantity": 300, "unit": "g", "optional": False}
+                ],
+                "steps": ["豆腐切块", "下锅烧熟并调味"],
+                "meal_role": "mixed_dish",
+                "staple_type": "无",
+                "protein_sources": ["豆腐"],
+                "taste_tags": ["家常"],
+                "allergens": [],
+            },
+        ],
+        [{"role": "assistant", "content": "星河豆腐采用模型生成做法。"}],
+    )
+    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: _menu_context())
+
+    events = [
+        event
+        async for event in stream_conversation_agent(
+            provider=provider,
+            workspace_id="workspace",
+            site_id="kitchen",
+            meal_service_id="lunch",
+            diner_ids=None,
+            user_text="两个人想吃星河豆腐，预算 50 元",
+            history=[],
+            max_steps=6,
+        )
+    ]
+
+    generated = next(event for event in events if event["type"] == "recipe_generated")
+    assert generated["data"]["source"] == "model_generated"
+    turn = next(event["turn"] for event in events if event["type"] == "final")
+    assert turn.menu_recommendation is not None
+    item = next(item for item in turn.menu_recommendation["items"] if item["name"] == "星河豆腐")
+    assert item["source"] == "model_generated"
+    assert turn.menu_recommendation["budget_status"] == "partial"
 
 
 @pytest.mark.asyncio

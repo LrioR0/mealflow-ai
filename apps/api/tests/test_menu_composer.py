@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 from app.services.context_loader import (
+    FoodPreferenceContext,
     InventoryLine,
     MemberConstraint,
     PlanningContext,
@@ -214,3 +215,75 @@ def test_protein_diversity_avoids_two_pork_dishes() -> None:
     proteins = [item["name"] for item in menu["items"] if item["role_label"] == "荤菜"]
     assert "辣子鸡" in proteins
     assert not ({"红烧肉", "糖醋排骨"} <= set(proteins))
+
+
+def test_required_dish_is_locked_and_other_slots_are_filled() -> None:
+    context = _context(_kitchen(), [("shrimp", "虾仁"), ("cucumber", "黄瓜"), ("rice", "大米")])
+    menu, _suggestions = compose_menu(
+        {"diners": 2, "required_dishes": ["辣子鸡"], "budget_limit_cents": 6000},
+        context,
+        None,
+    )
+    names = {item["name"] for item in menu["items"]}
+    assert "辣子鸡" in names
+    assert len([item for item in menu["items"] if item["role_label"] == "荤菜"]) == 1
+    assert menu["constraint_snapshot"]["required_dishes"] == ["辣子鸡"]
+    assert menu["constraint_snapshot"]["budget_limit_cents"] == 6000
+
+
+def test_persistent_dish_dislike_excludes_arbitrary_recipe() -> None:
+    context = _context(_kitchen(), [("cucumber", "黄瓜"), ("chicken", "鸡肉")])
+    context.food_preferences = [
+        FoodPreferenceContext("owner", "dish", "cucumber", "拍黄瓜", "dislike")
+    ]
+    menu, _suggestions = compose_menu({}, context, ["owner"])
+    assert all(item["name"] != "拍黄瓜" for item in menu["items"])
+
+
+def test_explicitly_requested_disliked_dish_is_kept_with_warning() -> None:
+    context = _context(_kitchen(), [("cucumber", "黄瓜"), ("chicken", "鸡肉")])
+    context.food_preferences = [
+        FoodPreferenceContext("owner", "dish", "cucumber", "拍黄瓜", "dislike")
+    ]
+    menu, _suggestions = compose_menu(
+        {"required_dishes": ["拍黄瓜"]}, context, ["owner"]
+    )
+    cucumber = next(item for item in menu["items"] if item["name"] == "拍黄瓜")
+    assert any("明确点名" in warning for warning in cucumber["warnings"])
+
+
+def test_required_dish_with_allergy_is_blocked() -> None:
+    context = _context(_kitchen(), [("shrimp", "虾仁"), ("greens", "青菜")])
+    context.member_constraints = [
+        MemberConstraint("owner", "我", "restriction", "forbidden", "我·过敏虾仁", "shrimp")
+    ]
+    menu, _suggestions = compose_menu(
+        {"required_dishes": ["白灼虾"]}, context, ["owner"]
+    )
+    assert all(item["name"] != "白灼虾" for item in menu["items"])
+    assert menu["constraint_snapshot"]["blocked_required_dishes"] == ["白灼虾"]
+
+
+def test_generated_recipe_allergen_metadata_is_deterministically_blocked() -> None:
+    recipes = _kitchen()
+    generated = _recipe(
+        "generated-dessert",
+        "任意模型甜品",
+        "mixed_dish",
+        "无",
+        [_line("generated:syrup", "糖浆")],
+    )
+    generated.source = "model_generated"
+    generated.allergens = ["虾仁"]
+    recipes.append(generated)
+    context = _context(recipes, [("generated:syrup", "糖浆")])
+    context.member_constraints = [
+        MemberConstraint("owner", "我", "restriction", "forbidden", "我·过敏虾仁", "shrimp")
+    ]
+
+    menu, _suggestions = compose_menu(
+        {"required_dishes": ["任意模型甜品"]}, context, ["owner"]
+    )
+
+    assert all(item["name"] != "任意模型甜品" for item in menu["items"])
+    assert menu["constraint_snapshot"]["blocked_required_dishes"] == ["任意模型甜品"]

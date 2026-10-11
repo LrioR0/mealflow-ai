@@ -10,17 +10,18 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     DietaryRestriction,
+    HouseholdPantryConfig,
     Ingredient,
     InventoryItem,
-    HouseholdPantryConfig,
     MemberEvent,
+    MemberFoodPreference,
     Recipe,
     RecipeIngredient,
     User,
     WorkspaceMember,
 )
-from app.services.pantry import DEFAULT_PANTRY_STAPLE_KEYS, effective_pantry_keys, pantry_label
 from app.db.session import SessionLocal
+from app.services.pantry import DEFAULT_PANTRY_STAPLE_KEYS, effective_pantry_keys, pantry_label
 
 router = APIRouter(tags=["household"])
 
@@ -55,6 +56,16 @@ class MemberEventView(BaseModel):
     note: str | None
 
 
+class FoodPreferenceView(BaseModel):
+    id: str
+    user_id: str
+    target_type: str
+    target_key: str
+    target_name: str
+    preference: str
+    source: str
+
+
 class MemberView(BaseModel):
     user_id: str
     display_name: str
@@ -64,6 +75,7 @@ class MemberView(BaseModel):
     taboo: str | None
     note: str | None
     restrictions: list[RestrictionView]
+    food_preferences: list[FoodPreferenceView] = Field(default_factory=list)
 
 
 class HouseholdView(BaseModel):
@@ -162,6 +174,16 @@ class RestrictionCreateRequest(BaseModel):
     ingredient_key: str
 
 
+class FoodPreferenceCreateRequest(BaseModel):
+    workspace_id: str = "home-workspace"
+    user_id: str
+    target_type: str = Field(pattern="^(dish|ingredient)$")
+    target_key: str = Field(min_length=1, max_length=160)
+    target_name: str = Field(min_length=1, max_length=160)
+    preference: str = Field(pattern="^(like|dislike)$")
+    source: str = Field(default="profile", pattern="^(profile|conversation)$")
+
+
 class RecipeIngredientDetail(BaseModel):
     key: str
     name: str
@@ -244,6 +266,23 @@ def _load_household(session: Session, workspace_id: str) -> HouseholdView:
             )
         )
 
+    preference_rows = session.scalars(
+        select(MemberFoodPreference).where(MemberFoodPreference.workspace_id == workspace_id)
+    ).all()
+    preferences_by_user: dict[str, list[FoodPreferenceView]] = {}
+    for preference in preference_rows:
+        preferences_by_user.setdefault(preference.user_id, []).append(
+            FoodPreferenceView(
+                id=preference.id,
+                user_id=preference.user_id,
+                target_type=preference.target_type,
+                target_key=preference.target_key,
+                target_name=preference.target_name,
+                preference=preference.preference,
+                source=preference.source,
+            )
+        )
+
     user_rows = {
         user.id: user
         for user in session.scalars(
@@ -260,6 +299,7 @@ def _load_household(session: Session, workspace_id: str) -> HouseholdView:
             taboo=user_rows[user_id].taboo,
             note=user_rows[user_id].note,
             restrictions=restrictions_by_user.get(user_id, []),
+            food_preferences=preferences_by_user.get(user_id, []),
         )
         for user_id, (display_name, role) in members_meta.items()
     ]
@@ -410,6 +450,58 @@ def delete_restriction(restriction_id: str) -> None:
         session.commit()
 
 
+@router.post(
+    "/household/preferences",
+    response_model=HouseholdView,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_food_preference(payload: FoodPreferenceCreateRequest) -> HouseholdView:
+    with SessionLocal() as session:
+        member = session.scalar(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == payload.workspace_id,
+                WorkspaceMember.user_id == payload.user_id,
+            )
+        )
+        if member is None:
+            raise HTTPException(status_code=404, detail="家庭成员不存在")
+        preference = session.scalar(
+            select(MemberFoodPreference).where(
+                MemberFoodPreference.workspace_id == payload.workspace_id,
+                MemberFoodPreference.user_id == payload.user_id,
+                MemberFoodPreference.target_type == payload.target_type,
+                MemberFoodPreference.target_key == payload.target_key,
+            )
+        )
+        if preference is None:
+            preference = MemberFoodPreference(
+                workspace_id=payload.workspace_id,
+                user_id=payload.user_id,
+                target_type=payload.target_type,
+                target_key=payload.target_key,
+                target_name=payload.target_name,
+                preference=payload.preference,
+                source=payload.source,
+            )
+            session.add(preference)
+        else:
+            preference.target_name = payload.target_name
+            preference.preference = payload.preference
+            preference.source = payload.source
+        session.commit()
+        return _load_household(session, payload.workspace_id)
+
+
+@router.delete("/household/preferences/{preference_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_food_preference(preference_id: str) -> None:
+    with SessionLocal() as session:
+        preference = session.get(MemberFoodPreference, preference_id)
+        if preference is None:
+            raise HTTPException(status_code=404, detail="偏好不存在")
+        session.delete(preference)
+        session.commit()
+
+
 @router.get("/recipes/{recipe_id}", response_model=RecipeDetailView)
 def get_recipe_detail(recipe_id: str, diners: int | None = None) -> RecipeDetailView:
     """食谱详情:用量按用餐人数换算(默认按菜谱基准份数),库存与参考价一并返回。"""
@@ -540,6 +632,9 @@ def delete_member(user_id: str) -> None:
         session.query(MemberEvent).filter(MemberEvent.user_id == user_id).delete()
         session.query(DietaryRestriction).filter(
             DietaryRestriction.user_id == user_id
+        ).delete()
+        session.query(MemberFoodPreference).filter(
+            MemberFoodPreference.user_id == user_id
         ).delete()
         session.query(WorkspaceMember).filter(WorkspaceMember.user_id == user_id).delete()
         session.delete(user)

@@ -1334,7 +1334,7 @@ async def _stream_chat_impl(payload: ChatStreamRequest) -> AsyncIterator[str]:
     # 算在“理解需求”里，否则 UI 会留下一个永远悬在最上方的旋转状态。
     yield _status("parse_request", "理解需求", "done", "请求已接收，开始判断下一步")
 
-    # 首选受控工具循环：模型只可选择只读家庭工具，无法执行库存/餐单等写操作。
+    # 首选受控工具循环：模型只可选择只读家庭工具；明确偏好由编排层校验后受控写入。
     # Provider 不可用或不支持 function calling 时返回 None，继续走下方既有规则分支。
     live_tool_traces = []
     agent_text_streamed = False
@@ -1367,6 +1367,10 @@ async def _stream_chat_impl(payload: ChatStreamRequest) -> AsyncIterator[str]:
         elif agent_event["type"] == "text_reset":
             agent_text_streamed = False
             yield _sse("text_reset", {})
+        elif agent_event["type"] == "preference_updated":
+            yield _sse("preference_updated", agent_event["data"])
+        elif agent_event["type"] == "recipe_generated":
+            yield _sse("recipe_generated", agent_event["data"])
         elif agent_event["type"] == "final":
             turn = agent_event["turn"]
         elif agent_event["type"] == "fallback":

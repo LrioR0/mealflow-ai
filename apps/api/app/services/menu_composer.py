@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from itertools import combinations
 from typing import Any
@@ -80,20 +80,73 @@ def compose_menu(
         for item in args.get("preferred_ingredients") or []
         if str(item).strip()
     }
+    required_names = _normalized_names(args.get("required_dishes"))
+    excluded_names = _normalized_names(args.get("excluded_dishes"))
+    excluded_ingredients = _normalized_names(args.get("excluded_ingredients"))
+    selected_user_ids = set(diner_ids or [member.user_id for member in context.members])
+    disliked_dishes = {
+        _normalize_name(item.target_name)
+        for item in context.food_preferences
+        if item.preference == "dislike"
+        and item.target_type == "dish"
+        and (not selected_user_ids or item.user_id in selected_user_ids)
+    }
     availability = {
         recipe.id: _availability(recipe, context, diner_ids) for recipe in context.recipes
     }
-    eligible = [recipe for recipe in context.recipes if _eligible(recipe, availability[recipe.id])]
+    required_recipes: list[RecipeContext] = []
+    missing_required: list[str] = []
+    blocked_required: list[str] = []
+    warnings_by_recipe: dict[str, list[str]] = {}
+    for requested in required_names:
+        recipe = _find_named_recipe(context.recipes, requested)
+        if recipe is None:
+            missing_required.append(requested)
+            continue
+        groups = availability[recipe.id]
+        if groups["forbidden_ingredients"]:
+            blocked_required.append(recipe.name)
+            continue
+        required_recipes.append(recipe)
+        warnings = _warning_reasons(recipe, groups, context, diner_ids)
+        if _normalize_name(recipe.name) in disliked_dishes:
+            warnings.append("这道菜在长期不喜欢列表中，本次因明确点名而保留")
+        if warnings:
+            warnings_by_recipe[recipe.id] = warnings
+
+    required_ids = {recipe.id for recipe in required_recipes}
+    eligible = [
+        recipe
+        for recipe in context.recipes
+        if recipe.id not in required_ids
+        and _normalize_name(recipe.name) not in excluded_names
+        and _normalize_name(recipe.name) not in disliked_dishes
+        and not _recipe_has_excluded_ingredient(recipe, excluded_ingredients)
+        and _eligible(recipe, availability[recipe.id])
+        and not _warning_reasons(recipe, availability[recipe.id], context, diner_ids)
+    ]
     scores = {
         recipe.id: _recipe_score(recipe, availability[recipe.id], context, preferred)
         for recipe in eligible
     }
-    staple_recipe = _pick_staple(eligible, scores, slots)
-    chosen, relaxations = _choose_dishes(eligible, scores, slots)
+    remaining_slots = _remaining_slots(slots, required_recipes)
+    staple_required = next(
+        (recipe for recipe in required_recipes if recipe.meal_role in {"staple_side", "complete_meal"}),
+        None,
+    )
+    staple_recipe = staple_required or _pick_staple(eligible, scores, remaining_slots)
+    chosen, relaxations = _choose_dishes(eligible, scores, remaining_slots)
+    chosen = [*(_labeled_recipe(recipe) for recipe in required_recipes if recipe is not staple_required), *chosen]
     items: list[dict[str, Any]] = []
     suggestions: dict[str, dict[str, Any]] = {}
     for recipe, label in chosen:
-        view, missing = _item(recipe, label, diners, availability[recipe.id])
+        view, missing = _item(
+            recipe,
+            label,
+            diners,
+            availability[recipe.id],
+            warnings_by_recipe.get(recipe.id, []),
+        )
         items.append(view)
         for suggestion in missing:
             key = f"{suggestion['source_id']}:{suggestion['ingredient']}"
@@ -113,6 +166,27 @@ def compose_menu(
     durations = [item["duration_minutes"] for item in items]
     if staple_recipe is not None:
         durations.append(staple_recipe.duration_minutes)
+    budget_recipes = [recipe for recipe, _label in chosen]
+    if staple_recipe is not None and staple_recipe not in budget_recipes:
+        budget_recipes.append(staple_recipe)
+    estimated_costs = [
+        recipe.estimated_cost_cents * diners
+        for recipe in budget_recipes
+        if recipe.estimated_cost_cents is not None
+    ]
+    budget_limit = _optional_int(args.get("budget_limit_cents"))
+    budget_complete = bool(budget_recipes) and all(
+        recipe.estimated_cost_cents is not None for recipe in budget_recipes
+    )
+    estimated_total = sum(estimated_costs)
+    budget_status = "not_requested"
+    if budget_limit is not None:
+        if not budget_complete:
+            budget_status = "partial"
+        elif estimated_total > budget_limit:
+            budget_status = "over"
+        else:
+            budget_status = "verified"
     result = {
         "diners": diners,
         "dish_count": sum(1 for item in items if item["role"] != "soup"),
@@ -124,10 +198,20 @@ def compose_menu(
         "relaxations": relaxations,
         "ready_count": sum(item["state"] == "ready" for item in items),
         "purchase_optional_count": sum(item["state"] == "purchase_optional" for item in items),
-        "restricted_count": 0,
+        "restricted_count": len(blocked_required),
         "estimated_parallel_minutes": max(durations, default=0),
         "reason": "按人数、库存和荤素槽位生成，模型不能自行换菜",
         "style": style,
+        "constraint_snapshot": {
+            "required_dishes": [recipe.name for recipe in required_recipes],
+            "missing_required_dishes": missing_required,
+            "blocked_required_dishes": blocked_required,
+            "excluded_dishes": sorted(excluded_names | disliked_dishes),
+            "excluded_ingredients": sorted(excluded_ingredients),
+            "budget_limit_cents": budget_limit,
+        },
+        "estimated_cost_cents": estimated_total if budget_complete else None,
+        "budget_status": budget_status,
     }
     return result, list(suggestions.values())
 
@@ -170,6 +254,82 @@ def _optional_int(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_name(value: object) -> str:
+    return "".join(str(value or "").strip().lower().split())
+
+
+def _normalized_names(value: object) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {_normalize_name(item) for item in value if _normalize_name(item)}
+
+
+def _find_named_recipe(recipes: list[RecipeContext], requested: str) -> RecipeContext | None:
+    exact = next((item for item in recipes if _normalize_name(item.name) == requested), None)
+    if exact is not None:
+        return exact
+    matches = [
+        item
+        for item in recipes
+        if requested in _normalize_name(item.name) or _normalize_name(item.name) in requested
+    ]
+    return min(matches, key=lambda item: len(item.name), default=None)
+
+
+def _recipe_has_excluded_ingredient(recipe: RecipeContext, excluded: set[str]) -> bool:
+    if not excluded:
+        return False
+    values = {
+        _normalize_name(value)
+        for line in recipe.ingredients
+        for value in (line.key, line.name)
+    }
+    return bool(values & excluded)
+
+
+def _warning_reasons(
+    recipe: RecipeContext,
+    availability: dict[str, list[dict[str, Any]]],
+    context: PlanningContext,
+    diner_ids: list[str] | None,
+) -> list[str]:
+    reasons = [f"普通忌口：{row['name']}" for row in availability["warning_ingredients"]]
+    selected = set(diner_ids or [])
+    for constraint in context.member_constraints:
+        if constraint.kind != "event" or (selected and constraint.user_id not in selected):
+            continue
+        conflicts = set(recipe.taste_tags) & set(constraint.avoid_tags)
+        if conflicts:
+            reasons.append(f"{constraint.summary}，冲突口味：{'、'.join(sorted(conflicts))}")
+    return reasons
+
+
+def _remaining_slots(slots: MealSlots, required: list[RecipeContext]) -> MealSlots:
+    result = replace(slots)
+    for recipe in required:
+        if recipe.meal_role == "protein_dish":
+            result.protein = max(0, result.protein - 1)
+        elif recipe.meal_role == "vegetable_dish":
+            result.vegetable = max(0, result.vegetable - 1)
+        elif recipe.meal_role == "soup":
+            result.soup = max(0, result.soup - 1)
+        elif recipe.meal_role == "mixed_dish":
+            if result.flexible:
+                result.flexible -= 1
+            elif result.protein:
+                result.protein -= 1
+            elif result.vegetable:
+                result.vegetable -= 1
+        elif recipe.meal_role == "complete_meal":
+            result.protein = result.vegetable = result.flexible = result.soup = 0
+            result.complete_meal = True
+    return result
+
+
+def _labeled_recipe(recipe: RecipeContext) -> tuple[RecipeContext, str]:
+    return recipe, _ROLE_LABEL.get(recipe.meal_role, "主菜")
 
 
 def _staple_request(text: str) -> tuple[str, bool]:
@@ -261,10 +421,20 @@ def _template(diners: int) -> MealSlots:
 def _availability(
     recipe: RecipeContext, context: PlanningContext, diner_ids: list[str] | None
 ) -> dict[str, list[dict[str, Any]]]:
-    restricted = {
-        item.ingredient_key
+    active_constraints = [
+        item
         for item in context.member_constraints
-        if item.ingredient_key and (not diner_ids or not item.user_id or item.user_id in diner_ids)
+        if not diner_ids or not item.user_id or item.user_id in diner_ids
+    ]
+    forbidden = {
+        item.ingredient_key
+        for item in active_constraints
+        if item.level == "forbidden" and item.ingredient_key
+    }
+    warned = {
+        item.ingredient_key
+        for item in active_constraints
+        if item.level != "forbidden" and item.ingredient_key
     }
     groups: dict[str, list[dict[str, Any]]] = {
         "available_main_ingredients": [],
@@ -272,6 +442,8 @@ def _availability(
         "pantry_staples": [],
         "optional_ingredients": [],
         "restricted_ingredients": [],
+        "forbidden_ingredients": [],
+        "warning_ingredients": [],
     }
     for line in recipe.ingredients:
         row = {
@@ -280,8 +452,11 @@ def _availability(
             "quantity": str(line.quantity),
             "unit": line.unit,
         }
-        if line.key in restricted:
+        if line.key in forbidden:
             groups["restricted_ingredients"].append(row)
+            groups["forbidden_ingredients"].append(row)
+        elif line.key in warned:
+            groups["warning_ingredients"].append(row)
         elif line.optional:
             groups["optional_ingredients"].append(row)
         elif line.key in context.pantry_keys:
@@ -290,11 +465,48 @@ def _availability(
             groups["available_main_ingredients"].append(row)
         else:
             groups["missing_main_ingredients"].append(row)
+    ingredient_names: dict[str, set[str]] = {}
+    for known_recipe in context.recipes:
+        for line in known_recipe.ingredients:
+            ingredient_names.setdefault(line.key, set()).add(_normalize_name(line.name))
+    allergen_names = {_normalize_name(value) for value in recipe.allergens}
+    for constraint in active_constraints:
+        if not constraint.ingredient_key:
+            continue
+        aliases = {
+            _normalize_name(constraint.ingredient_key),
+            *ingredient_names.get(constraint.ingredient_key, set()),
+        }
+        matched = next(
+            (
+                allergen
+                for allergen in allergen_names
+                if any(alias and (alias in allergen or allergen in alias) for alias in aliases)
+            ),
+            None,
+        )
+        if matched is None:
+            continue
+        target = (
+            groups["forbidden_ingredients"]
+            if constraint.level == "forbidden"
+            else groups["warning_ingredients"]
+        )
+        if not any(row["key"] == constraint.ingredient_key for row in target):
+            row = {
+                "key": constraint.ingredient_key,
+                "name": next(iter(ingredient_names.get(constraint.ingredient_key, {matched}))),
+                "quantity": "",
+                "unit": "",
+            }
+            target.append(row)
+            if constraint.level == "forbidden":
+                groups["restricted_ingredients"].append(row)
     return groups
 
 
 def _eligible(recipe: RecipeContext, availability: dict[str, list[dict[str, Any]]]) -> bool:
-    if availability["restricted_ingredients"]:
+    if availability["forbidden_ingredients"]:
         return False
     return is_composable(recipe.meal_role, recipe.staple_type or "无")
 
@@ -448,6 +660,7 @@ def _item(
     label: str,
     diners: int,
     availability: dict[str, list[dict[str, Any]]],
+    warnings: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     missing = availability["missing_main_ingredients"]
     state = "purchase_optional" if missing else "ready"
@@ -477,6 +690,8 @@ def _item(
         "missing_main_ingredients": [row["name"] for row in missing],
         "optional_purchases": [row["name"] for row in missing],
         "restricted_ingredients": [],
+        "source": recipe.source,
+        "warnings": warnings or [],
     }, suggestions
 
 
