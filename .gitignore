@@ -156,3 +156,6 @@ apps/api/data/
 .zcodeignore
 start-dev.bat
 apps/web/public/data/dish-images/
+.tmp/
+.workbuddy/
+.idea/
