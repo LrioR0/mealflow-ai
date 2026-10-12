@@ -7,6 +7,7 @@ import InventoryView from '../views/admin/InventoryView.vue'
 import CookingHistoryView from '../views/admin/CookingHistoryView.vue'
 import ProcurementView from '../views/admin/ProcurementView.vue'
 import LazyCookbookView from '../views/admin/LazyCookbookView.vue'
+import CodePracticeView from '../views/admin/CodePracticeView.vue'
 import LoginView from '../views/LoginView.vue'
 
 const router = createRouter({
@@ -25,6 +26,7 @@ const router = createRouter({
         { path: 'cooking-history', component: CookingHistoryView },
         { path: 'procurement', component: ProcurementView },
         { path: 'cookbook', component: LazyCookbookView },
+        { path: 'code-practice', component: CodePracticeView },
       ],
     },
   ],

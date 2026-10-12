@@ -13,6 +13,7 @@ import {
   MagicStick,
   House,
   ShoppingCart,
+  EditPen,
 } from '@element-plus/icons-vue'
 import AccountChip from '../components/AccountChip.vue'
 import NotificationCenter from '../components/NotificationCenter.vue'
@@ -38,6 +39,7 @@ const allMenus: Array<{ label: string; icon: unknown; index?: string }> = [
   { index: '/admin/cooking-history', label: '下厨足迹', icon: Timer },
   { index: '/admin/members', label: '人员信息', icon: User },
   { index: '/admin/cookbook', label: '懒人宝典', icon: MagicStick },
+  { index: '/admin/code-practice', label: '代码练兵场', icon: EditPen },
   { label: '家庭档案', icon: House },
   { label: '系统设置', icon: Setting },
 ]
