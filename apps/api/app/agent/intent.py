@@ -7,7 +7,7 @@ import json
 import re
 import unicodedata
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -206,17 +206,33 @@ def upsert_member_preferences(
 
 async def generate_recipe(
     provider: LLMProvider,
-    dish_name: str,
+    dish_name: str | None,
     diners: int,
     context: PlanningContext,
+    *,
+    requirements: dict[str, Any] | None = None,
 ) -> RecipeContext | None:
+    requirements = requirements or {}
+    target_role = str(requirements.get("meal_role") or "")
+    guidance = {
+        "meal_role": target_role or None,
+        "style": str(requirements.get("style") or ""),
+        "excluded_ingredients": requirements.get("excluded_ingredients") or [],
+        "forbidden_ingredients": requirements.get("forbidden_ingredients") or [],
+        "available_ingredients": requirements.get("available_ingredients") or [],
+        "pantry_staples": requirements.get("pantry_staples") or [],
+    }
+    target = f"目标菜：{dish_name}。" if dish_name else "请自行命名一道人名清晰的菜。"
     prompt = (
         "你是家庭菜谱结构化生成器。只输出 JSON，字段为 name、servings、duration_minutes、"
         "ingredients[{name,quantity,unit,optional}]、steps、meal_role、staple_type、"
         "protein_sources、taste_tags、allergens。用量必须为正数；步骤至少两条；"
         "meal_role 只能是 protein_dish、vegetable_dish、mixed_dish、soup、"
         "staple_side、complete_meal。"
-        f"目标菜：{dish_name}；人数：{diners}。"
+        f"{target}人数：{diners}。"
+        "优先使用 available_ingredients 和 pantry_staples；允许其他主料，但不得使用 "
+        "forbidden_ingredients 或 excluded_ingredients。严格遵守下列生成约束："
+        + json.dumps(guidance, ensure_ascii=False)
     )
     messages: list[dict] = [{"role": "system", "content": prompt}]
     parsed: GeneratedRecipe | None = None
@@ -224,16 +240,19 @@ async def generate_recipe(
         try:
             raw = await provider.chat(messages=messages)
             parsed = GeneratedRecipe.model_validate(_json_object(raw))
-            requested_name = normalize_preference_key(dish_name)
-            generated_name = normalize_preference_key(parsed.name)
-            if not (
-                requested_name == generated_name
-                or requested_name in generated_name
-                or generated_name in requested_name
-            ):
-                raise ValueError("generated recipe name does not match request")
+            if dish_name:
+                requested_name = normalize_preference_key(dish_name)
+                generated_name = normalize_preference_key(parsed.name)
+                if not (
+                    requested_name == generated_name
+                    or requested_name in generated_name
+                    or generated_name in requested_name
+                ):
+                    raise ValueError("generated recipe name does not match request")
             if parsed.servings != diners:
                 raise ValueError("generated recipe servings do not match request")
+            if target_role and parsed.meal_role != target_role:
+                raise ValueError("generated recipe role does not match menu gap")
             break
         except Exception:  # noqa: BLE001 - provider/schema failure must degrade safely
             if attempt == 0:

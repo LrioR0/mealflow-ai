@@ -9,6 +9,7 @@ from app.db.models import MemberFoodPreference
 from app.db.session import SessionLocal
 from app.services.context_loader import (
     InventoryLine,
+    MemberConstraint,
     PlanningContext,
     RecipeContext,
     RecipeIngredientLine,
@@ -410,6 +411,129 @@ async def test_local_miss_generates_ephemeral_recipe_and_uses_it_in_menu(monkeyp
     item = next(item for item in turn.menu_recommendation["items"] if item["name"] == "星河豆腐")
     assert item["source"] == "model_generated"
     assert turn.menu_recommendation["budget_status"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_menu_gap_generates_ephemeral_candidate_then_recomposes(monkeypatch) -> None:
+    provider = _QueuedChatProvider(
+        [
+            {
+                "task_type": "meal_plan",
+                "diners": 2,
+                "budget_limit_cents": None,
+                "requested_dishes": [],
+                "excluded_dishes": [],
+                "preferred_ingredients": [],
+                "excluded_ingredients": [],
+                "style": "家常",
+                "preference_updates": [],
+            },
+            {
+                "name": "蒜蓉生菜",
+                "servings": 2,
+                "duration_minutes": 10,
+                "ingredients": [
+                    {"name": "生菜", "quantity": 300, "unit": "g", "optional": False}
+                ],
+                "steps": ["生菜洗净", "蒜蓉炒香后快速翻炒生菜"],
+                "meal_role": "vegetable_dish",
+                "staple_type": "无",
+                "protein_sources": [],
+                "taste_tags": ["家常"],
+                "allergens": [],
+            },
+        ],
+        [{"role": "assistant", "content": "已补齐一份模型生成的素菜。"}],
+    )
+    context = _menu_context()
+    context.recipes = [recipe for recipe in context.recipes if recipe.meal_role != "vegetable_dish"]
+    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: context)
+
+    events = [
+        event
+        async for event in stream_conversation_agent(
+            provider=provider,
+            workspace_id="workspace",
+            site_id="kitchen",
+            meal_service_id="lunch",
+            diner_ids=None,
+            user_text="两个人吃家常晚餐",
+            history=[],
+            max_steps=6,
+        )
+    ]
+
+    assert any(event["type"] == "recipe_generated" for event in events)
+    turn = next(event["turn"] for event in events if event["type"] == "final")
+    assert turn.menu_recommendation is not None
+    vegetable = next(
+        item
+        for item in turn.menu_recommendation["items"]
+        if item["role_label"] == "素菜"
+    )
+    assert vegetable["name"] == "蒜蓉生菜"
+    assert vegetable["source"] == "model_generated"
+
+
+@pytest.mark.asyncio
+async def test_unsafe_generated_menu_candidate_keeps_local_fallback(monkeypatch) -> None:
+    provider = _QueuedChatProvider(
+        [
+            {
+                "task_type": "meal_plan",
+                "diners": 2,
+                "budget_limit_cents": None,
+                "requested_dishes": [],
+                "excluded_dishes": [],
+                "preferred_ingredients": [],
+                "excluded_ingredients": [],
+                "style": "家常",
+                "preference_updates": [],
+            },
+            {
+                "name": "虾仁炒青菜",
+                "servings": 2,
+                "duration_minutes": 10,
+                "ingredients": [
+                    {"name": "虾仁", "quantity": 200, "unit": "g", "optional": False}
+                ],
+                "steps": ["虾仁洗净", "炒熟后调味"],
+                "meal_role": "vegetable_dish",
+                "staple_type": "无",
+                "protein_sources": [],
+                "taste_tags": ["家常"],
+                "allergens": ["虾仁"],
+            },
+        ],
+        [{"role": "assistant", "content": "本地方案已保留。"}],
+    )
+    context = _menu_context()
+    context.recipes = [recipe for recipe in context.recipes if recipe.meal_role != "vegetable_dish"]
+    context.member_constraints = [
+        MemberConstraint("member", "家人", "restriction", "forbidden", "过敏虾仁", "shrimp")
+    ]
+    context.ingredient_names = {"shrimp": "虾仁"}
+    monkeypatch.setattr("app.agent.conversation._load_context", lambda *args: context)
+
+    events = [
+        event
+        async for event in stream_conversation_agent(
+            provider=provider,
+            workspace_id="workspace",
+            site_id="kitchen",
+            meal_service_id="lunch",
+            diner_ids=None,
+            user_text="两个人吃家常晚餐",
+            history=[],
+            max_steps=6,
+        )
+    ]
+
+    assert not any(event["type"] == "recipe_generated" for event in events)
+    turn = next(event["turn"] for event in events if event["type"] == "final")
+    assert turn.menu_recommendation is not None
+    assert all(item["name"] != "虾仁炒青菜" for item in turn.menu_recommendation["items"])
+    assert any("还缺少一项蔬菜" in note for note in turn.menu_recommendation["relaxations"])
 
 
 @pytest.mark.asyncio

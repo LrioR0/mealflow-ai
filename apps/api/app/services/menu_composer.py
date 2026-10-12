@@ -216,6 +216,94 @@ def compose_menu(
     return result, list(suggestions.values())
 
 
+def unfilled_menu_slots(
+    args: dict[str, Any],
+    context: PlanningContext,
+    diner_ids: list[str] | None,
+    menu: dict[str, Any],
+) -> list[str]:
+    """Return the deterministic menu roles which the current candidate pool could not fill.
+
+    This is deliberately based on the composed result rather than recipe availability: a recipe
+    that is present but rejected for a hard constraint must still leave a slot for the controlled
+    generation fallback.
+    """
+    diners = _diners(args, context, diner_ids)
+    dish_count = _optional_int(args.get("dish_count"))
+    style = str(args.get("style") or "")
+    need_soup = bool(args.get("need_soup")) or "一汤" in style or "带汤" in style
+    if dish_count is None and "四菜一汤" in style:
+        dish_count = 4
+        need_soup = True
+    vegetarian = bool(args.get("vegetarian")) or any(token in style for token in ("素食", "全素"))
+    all_meat = (bool(args.get("all_meat")) or "全肉" in style) and not vegetarian
+    staple_kind, complete_meal = _staple_request(str(args.get("staple") or ""))
+    slots = _slots(
+        diners, dish_count, need_soup, vegetarian, all_meat, staple_kind, complete_meal
+    )
+    items = list(menu.get("items") or [])
+    labels = [str(item.get("role_label") or "") for item in items]
+    gaps: list[str] = []
+    gaps.extend(["protein_dish"] * max(0, slots.protein - labels.count("荤菜")))
+    gaps.extend(["vegetable_dish"] * max(0, slots.vegetable - labels.count("素菜")))
+    gaps.extend(["soup"] * max(0, slots.soup - labels.count("汤")))
+    non_soup_count = sum(1 for item in items if item.get("role") != "soup")
+    gaps.extend(["mixed_dish"] * max(0, slots.flexible - non_soup_count))
+    return gaps
+
+
+def is_recipe_safe_for_menu(
+    recipe: RecipeContext,
+    context: PlanningContext,
+    diner_ids: list[str] | None,
+    excluded_ingredients: list[str] | None = None,
+) -> bool:
+    """Validate generated candidates before they can enter a menu candidate pool."""
+    availability = _availability(recipe, context, diner_ids)
+    if not _eligible(recipe, availability):
+        return False
+    excluded = {
+        _normalize_name(str(item)) for item in excluded_ingredients or [] if str(item).strip()
+    }
+    candidate_terms = {
+        _normalize_name(value)
+        for value in [
+            *(line.key for line in recipe.ingredients),
+            *(line.name for line in recipe.ingredients),
+            *recipe.allergens,
+        ]
+    }
+    known_names: dict[str, set[str]] = {
+        key: {_normalize_name(name)} for key, name in context.ingredient_names.items()
+    }
+    for known_recipe in context.recipes:
+        for line in known_recipe.ingredients:
+            known_names.setdefault(line.key, set()).add(_normalize_name(line.name))
+    forbidden_aliases = {
+        _normalize_name(alias)
+        for constraint in context.member_constraints
+        if constraint.level == "forbidden"
+        and constraint.ingredient_key
+        and (not diner_ids or not constraint.user_id or constraint.user_id in diner_ids)
+        for alias in [
+            constraint.ingredient_key,
+            *known_names.get(constraint.ingredient_key, set()),
+        ]
+    }
+    blocked = excluded | forbidden_aliases
+    return not any(
+        candidate
+        and blocked_term
+        and (
+            candidate == blocked_term
+            or candidate in blocked_term
+            or blocked_term in candidate
+        )
+        for candidate in candidate_terms
+        for blocked_term in blocked
+    )
+
+
 def render_menu_reply(menu: dict[str, Any]) -> str:
     lines = [f"按 {menu['diners']} 人准备：{menu['meal_structure']}。"]
     for note in menu.get("relaxations") or []:

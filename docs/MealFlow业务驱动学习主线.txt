@@ -1,0 +1,187 @@
+MealFlow 业务驱动学习主线
+============================
+
+目标
+----
+不是从头补完所有课程，而是借 MealFlow 这个真实项目，学会：
+
+1. 看懂一项功能从前端到后端再到数据库/模型的完整路径；
+2. 判断 AI 生成的代码该放在哪里、是否安全、是否真的解决问题；
+3. 独立完成小改动，并用测试证明它没有弄坏原有功能。
+
+本学习主线只使用课程目录中的文字笔记、代码和课件；不学习视频文件。
+
+
+先记住一条主链路
+------------------
+
+用户发消息
+  -> Vue 前端请求
+  -> FastAPI 路由
+  -> Pydantic 校验
+  -> 业务服务 / 数据库
+  -> LLM Function Calling
+  -> Agent 工具循环
+  -> SSE 流式结果回前端
+
+每学习一个主题，都要回到这条链路中回答：输入是什么？输出是什么？谁负责校验？
+
+
+阶段 1：看懂项目如何启动和收到请求
+------------------------------------
+
+课程资料：
+- D:\千锋大模型课程\day18\day18fastapi\笔记\fastapi.md
+  阅读 HTTP、路由、请求与响应、Pydantic 四节。
+- D:\千锋大模型课程\day20\4.5\day20前后端联调和git\笔记\git.md
+  先学 status、diff、add、commit、分支。
+
+项目代码：
+- apps/api/app/main.py
+- apps/api/app/api/router.py
+- apps/api/app/api/routes/chat.py
+- apps/web/src/views/admin/ConversationWorkbench.vue
+
+要掌握：
+- 浏览器点击发送后，哪个接口收到请求？
+- @app.get 和 @router.post 分别做了什么？
+- Swagger 为什么能自动显示接口？
+- 为什么前端不应直接连数据库或调用模型？
+
+练习：
+在 main.py 写一个只读 GET 接口，返回 message 和 current_time；在 Swagger 中执行并看返回 JSON。
+
+
+阶段 2：学会项目分层和数据边界
+--------------------------------
+
+项目代码：
+- apps/api/app/db/models.py
+- apps/api/app/db/session.py
+- apps/api/app/schemas/
+- apps/api/app/services/inventory_service.py
+- apps/api/app/services/context_loader.py
+
+要掌握：
+- 数据库 ORM 模型、Pydantic Schema、业务服务各自负责什么；
+- 为什么路由里不应该直接堆 SQL；
+- PlanningContext 为什么是 Agent 的可信上下文；
+- 数据库数据和模型生成内容为什么必须区分来源。
+
+练习：
+给库存汇总增加“临期食材数量”字段，并写一个 pytest 测试。
+
+
+阶段 3：学会大模型 API 和结构化输出
+------------------------------------
+
+课程资料：
+- D:\千锋大模型课程\day25提示词工程和LangChain入门\笔记\提示词工程.md
+  重点：SDK、OpenAI 兼容接口、ReAct、上下文工程。
+- D:\千锋大模型课程\day26LangChain入门和RAG\笔记\LangChain入门.md
+  重点：提示词模板、JSON/Pydantic 结构化输出。
+
+项目代码：
+- apps/api/app/llm/provider.py
+- apps/api/app/llm/openai_compatible.py
+- apps/api/app/llm/factory.py
+- apps/api/app/llm/protocol_guard.py
+
+要掌握：
+- chat、chat_with_tools、chat_stream 的职责差异；
+- 为什么模型输出不是可信数据；
+- Prompt 和后端业务规则的边界；
+- 为什么需要结构化校验和协议泄漏拦截。
+
+练习：
+阅读 protocol_guard.py 和对应测试，用自己的话说明它拦截了哪类错误输出。
+
+
+阶段 4：重点——Function Calling 和 Agent
+----------------------------------------
+
+课程资料：
+- day25 的 ReAct 部分；
+- D:\千锋大模型课程\day30Agent\笔记\智能体开发.md
+  重点：状态、结构化输出、流式处理；
+- D:\千锋大模型课程\day35langgraph\day35LangGraph\笔记\LangGraph.md
+  重点：状态机与条件分支概念。
+
+项目代码：
+- apps/api/app/agent/conversation.py
+- apps/api/app/agent/intent.py
+- apps/api/app/services/menu_composer.py
+- apps/api/tests/test_conversation_agent.py
+
+要掌握：
+- MealFlow 当前是 Function Calling，不是 MCP；
+- 模型只选择工具，后端真正执行工具；
+- 本地菜谱、库存和家庭限制是事实来源；
+- 模型生成菜谱为什么要做结构化和安全校验；
+- 工具调用必须有限制、可追踪、可测试。
+
+练习：
+先画出“用户需求 -> 意图解析 -> 工具调用 -> 菜单编排 -> 回答”的流程图；
+再尝试设计一个只读工具 get_expiring_inventory，先说清楚输入、输出和测试，再开始写代码。
+
+
+阶段 5：前后端联调、流式输出与测试
+------------------------------------
+
+课程资料：
+- day18 FastAPI 的异步和中间件部分；
+- day30 Agent 的流式处理部分；
+- day20 Git 的分支和提交部分。
+
+项目代码：
+- apps/api/app/services/chat_service.py
+- apps/web/src/views/admin/ConversationWorkbench.vue
+- apps/api/tests/test_final_reply_stream.py
+
+要掌握：
+- SSE 是什么，为什么聊天回答可以逐段显示；
+- recipe_generated 事件如何从后端传到前端；
+- 为什么改后端必须跑测试和看 git diff；
+- 为什么一个功能要有成功、失败和降级三类测试。
+
+练习：
+追踪 recipe_generated 事件：后端在哪里 yield，哪里转成 SSE，前端在哪里接收，页面在哪里显示“模型生成”。
+
+
+阶段 6：MCP、RAG、LangGraph 放到最后
+------------------------------------
+
+课程资料：
+- D:\千锋大模型课程\day31Agent和MCP\笔记\MCP.md
+- D:\千锋大模型课程\day26LangChain入门和RAG\笔记\RAG.md
+- day35 LangGraph 笔记。
+
+当前只理解概念，不急着接入 MealFlow：
+- MCP：让多个 Agent 或外部客户端复用工具；
+- RAG：检索大量非结构化文档，不替代业务数据库；
+- LangGraph：流程很复杂、状态和分支很多时使用。
+
+MealFlow 当前的菜谱、库存和限制是结构化业务数据，优先学透现有的 Function Calling + 后端服务架构。
+
+
+每天的固定学习闭环（45 到 90 分钟）
+-----------------------------------
+
+1. 只读一个很小的课程主题；
+2. 找到 MealFlow 中对应的 1 到 3 个文件；
+3. 写下：输入、输出、依赖、校验、失败时怎么办；
+4. 完成一个极小改动或测试；
+5. 运行相关 pytest；
+6. 查看 git diff；
+7. 把“我的理解”和“卡住的位置”发给 Codex，请求代码审查，而不是直接索要完整答案。
+
+
+暂不学习的内容
+--------------
+
+- 深度学习训练、CNN、PyTorch；
+- 机器学习算法和数学推导；
+- 为了“看起来 AI”而强行接入 RAG、MCP、LangChain 或多 Agent；
+- 大型重构和一次改很多文件。
+
+先把一条真实业务链路走通并能自己修改，学习会变得非常快。

@@ -21,7 +21,12 @@ from app.llm.protocol_guard import contains_protocol_leak, normalize_model_messa
 from app.llm.provider import LLMProvider
 from app.schemas.agent import ToolTraceView
 from app.services.context_loader import PlanningContext, RecipeContext, load_planning_context
-from app.services.menu_composer import compose_menu, render_menu_reply
+from app.services.menu_composer import (
+    compose_menu,
+    is_recipe_safe_for_menu,
+    render_menu_reply,
+    unfilled_menu_slots,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +124,61 @@ def _availability(recipe: RecipeContext, context: PlanningContext, diner_ids: li
 
 def _recommend_menu(args: dict[str, Any], context: PlanningContext, diner_ids: list[str] | None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return compose_menu(args, context, diner_ids)
+
+
+def _generation_requirements(
+    context: PlanningContext,
+    diner_ids: list[str] | None,
+    *,
+    meal_role: str = "",
+    style: str = "",
+    excluded_ingredients: list[str] | None = None,
+) -> dict[str, Any]:
+    names_by_key: dict[str, set[str]] = {
+        key: {name} for key, name in context.ingredient_names.items()
+    }
+    for recipe in context.recipes:
+        for line in recipe.ingredients:
+            names_by_key.setdefault(line.key, set()).add(line.name)
+    active = [
+        item
+        for item in context.member_constraints
+        if not diner_ids or not item.user_id or item.user_id in diner_ids
+    ]
+    forbidden = {
+        name
+        for item in active
+        if item.level == "forbidden" and item.ingredient_key
+        for name in names_by_key.get(item.ingredient_key, {item.ingredient_key})
+    }
+    available = [item.name for item in context.inventory if item.quantity > 0]
+    pantry = sorted(
+        name
+        for key in context.pantry_keys
+        for name in names_by_key.get(key, {key})
+    )
+    return {
+        "meal_role": meal_role,
+        "style": style,
+        "excluded_ingredients": excluded_ingredients or [],
+        "forbidden_ingredients": sorted(forbidden),
+        "available_ingredients": available,
+        "pantry_staples": pantry,
+    }
+
+
+def _accept_generated_recipe(
+    recipe: RecipeContext,
+    context: PlanningContext,
+    diner_ids: list[str] | None,
+    *,
+    expected_role: str = "",
+    excluded_ingredients: list[str] | None = None,
+) -> bool:
+    return (
+        (not expected_role or recipe.meal_role == expected_role)
+        and is_recipe_safe_for_menu(recipe, context, diner_ids, excluded_ingredients)
+    )
 
 
 def _safe_reply(text: str, menu: dict[str, Any] | None) -> str:
@@ -262,8 +322,24 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
         for dish_name in intent.requested_dishes:
             if find_recipe(context, dish_name) is not None:
                 continue
-            recipe = await generate_recipe(provider, dish_name, diners, context)
-            if recipe is not None:
+            recipe = await generate_recipe(
+                provider,
+                dish_name,
+                diners,
+                context,
+                requirements=_generation_requirements(
+                    context,
+                    diner_ids,
+                    style=intent.style,
+                    excluded_ingredients=intent.excluded_ingredients,
+                ),
+            )
+            if recipe is not None and _accept_generated_recipe(
+                recipe,
+                context,
+                diner_ids,
+                excluded_ingredients=intent.excluded_ingredients,
+            ):
                 context.recipes.append(recipe)
                 generated.append(recipe)
                 yield {
@@ -318,6 +394,62 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
         result, summary, initial_suggestions = _run_tool(
             "recommend_menu", menu_args, context, diner_ids
         )
+        generated_for_gaps = 0
+        gap_roles = unfilled_menu_slots(menu_args, context, diner_ids, result)
+        diners = int(result["diners"])
+        for role in gap_roles[:2]:
+            requirements = _generation_requirements(
+                context,
+                diner_ids,
+                meal_role=role,
+                style=intent.style,
+                excluded_ingredients=intent.excluded_ingredients,
+            )
+            recipe = await generate_recipe(
+                provider, None, diners, context, requirements=requirements
+            )
+            if recipe is None or not _accept_generated_recipe(
+                recipe,
+                context,
+                diner_ids,
+                expected_role=role,
+                excluded_ingredients=intent.excluded_ingredients,
+            ):
+                continue
+            if find_recipe(context, recipe.name) is not None:
+                continue
+            context.recipes.append(recipe)
+            generated.append(recipe)
+            generated_for_gaps += 1
+            yield {
+                "type": "recipe_generated",
+                "data": {
+                    "recipe_id": recipe.id,
+                    "name": recipe.name,
+                    "source": recipe.source,
+                },
+            }
+        if generated_for_gaps:
+            result, summary, initial_suggestions = _run_tool(
+                "recommend_menu", menu_args, context, diner_ids
+            )
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "以下菜谱为模型生成而非本地库。回答中必须明确说明来源："
+                    + json.dumps(
+                        [
+                            {
+                                "name": recipe.name,
+                                "source": recipe.source,
+                                "servings": recipe.servings,
+                            }
+                            for recipe in generated[-generated_for_gaps:]
+                        ],
+                        ensure_ascii=False,
+                    ),
+                }
+            )
         actions += 1
         menu_recommendation = result
         for item in initial_suggestions:

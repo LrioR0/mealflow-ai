@@ -9,7 +9,7 @@ from app.services.context_loader import (
     RecipeContext,
     RecipeIngredientLine,
 )
-from app.services.menu_composer import compose_menu
+from app.services.menu_composer import compose_menu, unfilled_menu_slots
 
 
 def _line(key: str, name: str, quantity: str = "1", unit: str = "份") -> RecipeIngredientLine:
@@ -174,9 +174,11 @@ def test_vegetable_only_inventory_does_not_pretend_meat_exists() -> None:
 
 def test_missing_vegetable_recipe_is_explained() -> None:
     recipes = [item for item in _kitchen() if item.meal_role != "vegetable_dish"]
-    menu, _suggestions = compose_menu({}, _context(recipes, [("chicken", "鸡肉")]), None)
+    context = _context(recipes, [("chicken", "鸡肉")])
+    menu, _suggestions = compose_menu({}, context, None)
     assert all(item["role_label"] != "素菜" for item in menu["items"])
     assert any("还缺少一项蔬菜" in note for note in menu["relaxations"])
+    assert unfilled_menu_slots({}, context, None, menu) == ["vegetable_dish"]
 
 
 def test_incomplete_recipe_is_not_composed() -> None:

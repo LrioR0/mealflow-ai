@@ -137,6 +137,7 @@ class PlanningContext:
     dish_feedback: dict[str, "DishFeedbackStats"] = field(default_factory=dict)
     pantry_keys: set[str] = field(default_factory=set)
     food_preferences: list[FoodPreferenceContext] = field(default_factory=list)
+    ingredient_names: dict[str, str] = field(default_factory=dict)
 
     def expiring_keys(self, today: date) -> set[str]:
         return {line.key for line in self.inventory if line.is_expiring(today)}
@@ -213,6 +214,10 @@ def load_planning_context(
         )
 
     # 菜谱与配方明细
+    ingredient_names = {
+        ingredient.key: ingredient.name
+        for ingredient in session.scalars(select(Ingredient)).all()
+    }
     recipes: list[RecipeContext] = []
     recipe_rows = session.scalars(select(Recipe)).all()
     links = session.execute(
@@ -355,6 +360,7 @@ def load_planning_context(
         excluded_keys=excluded_keys,
         restriction_types=restriction_types,
         pantry_keys=effective_pantry_keys(session, workspace.id),
+        ingredient_names=ingredient_names,
         food_preferences=[
             FoodPreferenceContext(
                 user_id=item.user_id,
