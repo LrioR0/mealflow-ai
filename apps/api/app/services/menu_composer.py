@@ -62,6 +62,8 @@ class MealSlots:
 def compose_menu(
     args: dict[str, Any], context: PlanningContext, diner_ids: list[str] | None
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    # 这是菜单的确定性边界：这里计算出的菜品结构、约束过滤和采购缺口
+    # 是可信结果；模型只能把它解释成自然语言，不能自行替换或添加菜。
     diners = _diners(args, context, diner_ids)
     dish_count = _optional_int(args.get("dish_count"))
     style = str(args.get("style") or "")
@@ -222,11 +224,10 @@ def unfilled_menu_slots(
     diner_ids: list[str] | None,
     menu: dict[str, Any],
 ) -> list[str]:
-    """Return the deterministic menu roles which the current candidate pool could not fill.
+    """返回当前本地候选池实际未填满的菜单槽位。
 
-    This is deliberately based on the composed result rather than recipe availability: a recipe
-    that is present but rejected for a hard constraint must still leave a slot for the controlled
-    generation fallback.
+    缺口必须以已编排的菜单为准，而不是只看“库里是否存在某道菜”：
+    被过敏等硬约束拒绝的菜即使存在，也不能算作填满槽位，才可触发受控生成补齐。
     """
     diners = _diners(args, context, diner_ids)
     dish_count = _optional_int(args.get("dish_count"))
@@ -258,7 +259,7 @@ def is_recipe_safe_for_menu(
     diner_ids: list[str] | None,
     excluded_ingredients: list[str] | None = None,
 ) -> bool:
-    """Validate generated candidates before they can enter a menu candidate pool."""
+    """校验模型生成菜，只有安全且可组合时才能进入本轮菜单候选池。"""
     availability = _availability(recipe, context, diner_ids)
     if not _eligible(recipe, availability):
         return False

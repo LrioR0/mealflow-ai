@@ -279,6 +279,8 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
     preference_events: list[dict[str, str]] = []
     intent = await parse_meal_intent(provider, user_text, history)
     try:
+        # 一轮对话只加载一次数据库快照；后续工具都使用同一份可信上下文，
+        # 防止模型在不同工具间看到彼此不一致的库存、限制或菜谱数据。
         context = _load_context(workspace_id, site_id, meal_service_id)
     except Exception:
         yield {"type": "fallback"}
@@ -316,6 +318,7 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
             yield {"type": "preference_updated", "data": event}
         if any(event.get("status") == "saved" for event in preference_events):
             context = _load_context(workspace_id, site_id, meal_service_id)
+    # 生成菜谱仅附加到本次内存中的 context，不写入数据库；下一轮仍以本地菜谱库为准。
     generated: list[RecipeContext] = []
     if intent is not None:
         diners = intent.diners or (len(diner_ids) if diner_ids else context.expected_diners)
@@ -394,6 +397,8 @@ async def stream_conversation_agent(*, provider: LLMProvider | None, workspace_i
         result, summary, initial_suggestions = _run_tool(
             "recommend_menu", menu_args, context, diner_ids
         )
+        # 整餐先严格使用本地菜谱编排，再依据“实际菜单结果”计算槽位缺口。
+        # 最多补两道且只重新编排一次，避免模型生成触发无限递归或掩盖本地数据不足。
         generated_for_gaps = 0
         gap_roles = unfilled_menu_slots(menu_args, context, diner_ids, result)
         diners = int(result["diners"])

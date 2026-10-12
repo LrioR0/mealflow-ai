@@ -170,6 +170,8 @@ class DishFeedbackStats:
 def load_planning_context(
     session: Session, workspace_id: str, site_id: str, meal_service_id: str
 ) -> PlanningContext:
+    # 先逐级验证工作区 → 地点 → 餐次的归属关系，再读取数据。
+    # 这是 Agent 可相信的边界：不能仅凭前端传来的 ID 跨工作区读取家庭数据。
     workspace = session.get(Workspace, workspace_id)
     if workspace is None:
         raise ScopeNotFoundError(f"workspace {workspace_id} 不存在")
@@ -213,7 +215,8 @@ def load_planning_context(
             )
         )
 
-    # 菜谱与配方明细
+    # 菜谱与配方明细。这里组装成脱离 ORM 的 RecipeContext，后续规划层只读它，
+    # 因而不会在菜单计算过程中意外触发数据库写入。
     ingredient_names = {
         ingredient.key: ingredient.name
         for ingredient in session.scalars(select(Ingredient)).all()
