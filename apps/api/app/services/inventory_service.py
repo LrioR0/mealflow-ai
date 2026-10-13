@@ -93,28 +93,58 @@ def list_items(session: Session, workspace_id: str) -> list[InventoryItemView]:
 
 
 def add_item(session: Session, workspace_id: str, payload: InventoryCreate) -> InventoryItemView:
-    """新增库存项；同一食材已存在时按数据字典语义更新为最新数量（upsert）。"""
+    """新增库存项；同一食材已存在时按数据字典语义更新为最新数量（upsert）。
+
+    学习路线：先校验工作区 → 解析食材 → 校验单位 → 查询已有库存 →
+    新建或更新 → 提交事务 → 转为接口响应。
+    """
+    # 用主键查询工作区；不存在说明 URL 中传来的 workspace_id 无效。
     if session.get(Workspace, workspace_id) is None:
+        # 抛出业务层异常，由 Router 统一翻译为 HTTP 404 响应。
         raise WorkspaceNotFoundError(f"工作区 {workspace_id} 不存在")
+
+    # 根据 Schema 已校验的 payload 找到已有食材，或创建用户输入的自定义食材。
     ingredient = _resolve_ingredient(session, payload)
+
+    # 用户未填写单位时，回退为食材数据字典定义的默认单位。
     unit = payload.unit or ingredient.default_unit
+
+    # Schema 只能校验“单位是合法字符串”；与该食材是否能安全匹配属于业务规则。
     if unit != ingredient.default_unit:
+        # 当前项目没有单位换算表，因此不擅自把“克”和“个”等不同单位互相转换。
         raise UnitMismatchError(
             f"单位 {unit} 与食材默认单位 {ingredient.default_unit} 不一致，无法安全换算，需人工确认"
         )
+
+    # 查询“当前工作区 + 当前食材”的库存记录；scalar 取一条记录，无结果时返回 None。
     item = session.scalar(
+        # select(InventoryItem) 对应 SQL 的 SELECT ... FROM inventory_items。
         select(InventoryItem).where(
+            # 第一项条件：库存必须属于本次请求的工作区。
             InventoryItem.workspace_id == workspace_id,
+            # 第二项条件：库存必须对应刚才解析出的食材。
             InventoryItem.ingredient_id == ingredient.id,
         )
     )
+
+    # 找不到记录时才创建；找到时复用旧对象，实现“有则更新、无则新增”。
     if item is None:
+        # 此时只创建 Python ORM 对象，并指定两张表之间的外键关联。
         item = InventoryItem(workspace_id=workspace_id, ingredient_id=ingredient.id)
+        # 放入当前数据库事务，commit 前尚未永久写入 SQLite 文件。
         session.add(item)
+
+    # 无论新建或已有记录，都把数量覆盖为本次提交的最新值，而不是累加。
     item.quantity = payload.quantity
+    # 保存已通过业务规则确认的单位。
     item.unit = unit
+    # 保存到期日；payload 中允许为空，表示用户暂时未知到期日。
     item.expires_on = payload.expires_on
+
+    # 提交事务：此时新增或更新才真正写入 mealflow.sqlite3。
     session.commit()
+
+    # 将 ORM 对象转换成对外稳定的 Pydantic 响应格式，再返回给 Router 和前端。
     return _to_view(session, item, ingredient)
 
 
